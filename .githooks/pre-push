@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+repo_root=$(git rev-parse --show-toplevel)
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in
+        0000000000000000000000000000000000000000) continue ;;
+    esac
+    python3 "$repo_root/tools/repository_guard.py" --history "$local_sha"
+done

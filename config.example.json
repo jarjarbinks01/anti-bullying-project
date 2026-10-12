@@ -1,0 +1,59 @@
+{
+  "config_version": 2,
+  "source_scope": "merged_abcd",
+  "project_root": "/path/to/private-study2-project",
+  "state_dir": "/path/to/private-local-state",
+  "release_dir": "./releases/merged",
+  "inbox_dir": "./inbox/merged",
+  "mapping_dir": "./mappings",
+  "mapping_hashes": {
+    "1.3.1_standardise_paperform_data.py": "9a039eb698cc08173271b09c47b38dddc1c8987969edc5086d5d458cdf366c0f",
+    "1.3.2_standardise_separate_school_data.py": "354a55ba67ff83311fd2aff9eba3e65cad0a1cc6c769ca35ea82104f5d6c3739",
+    "2.1.1_produce_ABCD.py": "a24b32f3db4160fa52f2ae2eaca2e940635c53906067cddb8dabf1c91816bbb9"
+  },
+  "source_folder": "2.1.2_T0T1-student-parent(A,B,C,D)_merged_paperform",
+  "duplicate_days": 30,
+  "minimum_followup_days": 90,
+  "stale_after_days": 8,
+  "date_policy": "current_creation_time_user_accepted_20261006",
+  "bd_requires_same_adult": true,
+  "matching_policy": {
+    "allow_one_digit_phone": true,
+    "allow_school_transfer": true,
+    "allow_exact_general_contact_when_personal_missing": true
+  },
+  "sources": [
+    {
+      "source_id": "merged_student_T0",
+      "kind": "merged",
+      "role": "student",
+      "wave": "T0",
+      "pattern": "A_T0-student_merged.xlsx",
+      "columns": []
+    },
+    {
+      "source_id": "merged_parent_T0",
+      "kind": "merged",
+      "role": "parent",
+      "wave": "T0",
+      "pattern": "B_T0-parent_merged.xlsx",
+      "columns": []
+    },
+    {
+      "source_id": "merged_student_T1",
+      "kind": "merged",
+      "role": "student",
+      "wave": "T1",
+      "pattern": "C_T1-student_merged.xlsx",
+      "columns": []
+    },
+    {
+      "source_id": "merged_parent_T1",
+      "kind": "merged",
+      "role": "parent",
+      "wave": "T1",
+      "pattern": "D_T1-parent_merged.xlsx",
+      "columns": []
+    }
+  ]
+}

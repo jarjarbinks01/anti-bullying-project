@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hku-study2-pipeline"
+version = "0.1.0"
+description = "Auditable local prototype for the Study 2 child-centred panel"
+requires-python = ">=3.12"
+dependencies = ["pandas>=2.2,<3", "numpy>=1.26,<3", "openpyxl>=3.1,<4", "pyarrow>=18,<26", "streamlit>=1.40,<2", "plotly>=5,<7"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+study2 = "study2.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["study2*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+study2 = ["assets/review_template.xlsx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
