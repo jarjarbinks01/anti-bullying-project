@@ -61,21 +61,49 @@ def excel_safe(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.map(safe)
 
 
-def write_excel(path: Path, sheets: dict[str, list | pd.DataFrame]) -> None:
+def write_excel(path: Path, sheets: dict[str, list | pd.DataFrame], tracking=False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, rows in sheets.items():
             frame = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+            if tracking:
+                frame = frame.copy()
+                for column_name in frame:
+                    if column_name.endswith('_at'):
+                        frame[column_name] = frame[column_name].map(lambda v: timestamp(v).replace(tzinfo=None) if timestamp(v) else v)
             excel_safe(frame).to_excel(writer, sheet_name=name[:31], index=False)
             ws = writer.sheets[name[:31]]
             ws.freeze_panes = "A2"
             ws.auto_filter.ref = ws.dimensions
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = min(48, max(14, len(str(col[0].value or "")) + 2))
+                if str(col[0].value).endswith('dyad_id'):
+                    ws.column_dimensions[col[0].column_letter].width = 44
+                elif str(col[0].value).endswith('registration_state'):
+                    ws.column_dimensions[col[0].column_letter].width = 26
             from openpyxl.styles import Font, PatternFill
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="224B57")
+            if tracking:
+                from openpyxl.styles import Alignment
+                hidden = {'evidence_signature','eligibility_signature','member_ids','candidate_dyad_ids',
+                          'retired_dyad_ids','contradictory_candidates'}
+                for col in ws.columns:
+                    name = str(col[0].value or '')
+                    width = max(len(str(c.value or '')) for c in col[:101]) + 2
+                    ws.column_dimensions[col[0].column_letter].width = min(48, max(16, width))
+                    if name in hidden:
+                        ws.column_dimensions[col[0].column_letter].hidden = True
+                    if name.endswith('_at'):
+                        ws.column_dimensions[col[0].column_letter].width = 27
+                        for cell in col[1:]:
+                            cell.number_format = 'yyyy-mm-dd hh:mm" UTC"'
+                    for cell in col:
+                        cell.alignment = Alignment(vertical='top', wrap_text=True)
+                ws.row_dimensions[1].height = 32
+                for row in ws.iter_rows(min_row=2):
+                    ws.row_dimensions[row[0].row].height = 36
     path.chmod(0o600)
 
 
@@ -94,7 +122,12 @@ def export_row(record: dict) -> dict:
 
 
 def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_queue: list[dict], schemas: dict,
-                  adult_pairs: list[dict] | None = None) -> dict:
+                  adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None) -> dict:
+    dyad_mapping = {r['child_id']: r for r in registration_rows or [] if r.get('child_id')}
+    def permanent(child):
+        item = dyad_mapping.get(child, {})
+        return {'dyad_id': item.get('dyad_id') if item.get('registration_state') == 'active' else None,
+                'registration_state': item.get('registration_state', 'not_registered')}
     schemas = {role: cols + ["school_type", "school_sex", "school_district", "school_religion"] for role, cols in schemas.items()}
     selected = [r for r in records if r["selected_wave"]]
     cells = {(r["child_id"], r["role"], r["selected_wave"]): r for r in selected}
@@ -163,6 +196,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                 for role_record in [s, p]:
                     for k, v in role_record["answer"].items():
                         row[k if k.startswith(("student_", "parent_", "adult_")) else role_record["role"] + "_" + k] = v
+                row.update(permanent(child))
                 paired.append(row)
                 dyad_rows[(child, wave)] = row
             elif s:
@@ -170,7 +204,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
             elif p:
                 parent_only.append(export_row(p))
         # Paired outputs live in corrected-stage folder; no administrative files touched.
-        paired_cols = ["child_id", "student_same_person_entry_id", "parent_same_person_entry_id", "student_submission_id", "parent_submission_id"]
+        paired_cols = ["child_id", "student_same_person_entry_id", "parent_same_person_entry_id", "student_submission_id", "parent_submission_id", "dyad_id", "registration_state"]
         if paired:
             paired_cols = list(paired[0])
         write_excel(folder / "3.1.3_manual_pairing" / (label + "_final.xlsx"), {
@@ -198,8 +232,8 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                 caregiver = ("same_adult_by_reviewed_evidence" if rule == "reviewer_confirmed_same_adult"
                              else "same_adult_by_accepted_evidence") if status == "confirmed" else rule
             ef.append({"child_id": child, "caregiver_status": caregiver,
-                       **{"T0_" + k: v for k, v in a.items()}, **{"T1_" + k: v for k, v in b.items()}})
-    write_excel(folder / "3.1.3_manual_pairing/EF_T0T1-student&parent-paired_final.xlsx", {"paired": pd.DataFrame(ef, columns=list(ef[0]) if ef else ["child_id", "caregiver_status"])})
+                       **{"T0_" + k: v for k, v in a.items()}, **{"T1_" + k: v for k, v in b.items()}, **permanent(child)})
+    write_excel(folder / "3.1.3_manual_pairing/EF_T0T1-student&parent-paired_final.xlsx", {"paired": pd.DataFrame(ef, columns=list(ef[0]) if ef else ["child_id", "caregiver_status", "dyad_id", "registration_state"])})
     summary["EF"] = len(ef)
     analysis = []
     ef_children = {r["child_id"] for r in ef}
@@ -275,6 +309,14 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                                   "duplicate_of": r.get("duplicate_of"), "selected_wave": r["selected_wave"],
                                   "claimed_wave": r["claimed_wave"], "wave_reason": r.get("wave_reason"),
                                   "time_confidence": r["time_confidence"], "issues": ";".join(r["issues"])} for r in records]})
+    if registration_rows is not None:
+        from .dyads import safe_tracking_rows
+        tracking = pd.DataFrame(safe_tracking_rows(registration_rows))
+        if tracking.empty:
+            tracking = pd.DataFrame(columns=['dyad_id', 'child_id', 'registration_state', 'followup_status'])
+        tracking.to_parquet(folder / 'dyad_tracking.parquet', index=False)
+        write_excel(folder / 'dyad_tracking.xlsx', {'家庭追蹤': tracking,
+                    '待裁定': tracking[tracking['registration_state'] != 'active']}, tracking=True)
     return summary
 
 

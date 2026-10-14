@@ -17,13 +17,13 @@ EXACT_PATHS = {
     '.gitignore', '.gitattributes', 'README.md', 'pyproject.toml',
     'requirements.lock.txt', 'dashboard.py', 'config.example.json',
     'Prepare Batch.command', 'Run Pipeline.command', 'Start Dashboard.command',
-    'Export Review.command', 'Review Centre.command',
+    'Export Review.command', 'Review Centre.command', 'Dyad Centre.command',
     '.githooks/pre-commit', '.githooks/pre-push',
     'tools/repository_guard.py', 'tools/qa/synthetic_review.py',
     'tools/qa/review_workbook.mjs',
     'docs/DATA_MODEL.md', 'docs/STAGES.md', 'docs/REVIEW_CARDS_COLLEAGUES.md',
     'docs/REVIEW_CARDS_OPERATIONS.md', 'docs/MATCHING_RULES.md',
-    'docs/REPOSITORY.md',
+    'docs/REPOSITORY.md', 'docs/DYAD_TRACKING_OPERATIONS.md',
 }
 PYTHON_DIRECTORIES = {'study2', 'tests', 'mappings'}
 TEMPLATE_PATH = 'study2/assets/review_template.xlsx'
@@ -34,7 +34,7 @@ CONTENT_PATTERNS = [
     ('private key', re.compile(r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----')),
     ('GitHub credential', re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,})\b')),
     ('AWS access key', re.compile(r'\bAKIA[A-Z0-9]{16}\b')),
-    ('private research identifier', re.compile(r'\b(?:SUB|CASE|CHILD|RUN|REV|PKG|RB|DEC)_[0-9a-f]{20,}\b', re.I)),
+    ('private research identifier', re.compile(r'\b(?:SUB|CASE|CHILD|RUN|REV|PKG|RB|DEC|DYAD|DRES|DEVENT|INV)_[0-9a-f]{20,}\b', re.I)),
     ('survey response identifier', re.compile(r'\bR_[A-Za-z0-9]{10,}\b')),
     ('machine-specific user path', re.compile(r'''/(?:Users|home)/[^/\s"'<>]+/''')),
     ('literal credential', re.compile(r'''\b(?:api[_-]?key|client_secret|access_token|password)["']?\s*[:=]\s*["'][^"'\n]{12,}["']''', re.I)),

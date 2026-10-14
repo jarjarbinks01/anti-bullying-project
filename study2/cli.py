@@ -170,6 +170,20 @@ def main():
     reopen.add_argument("--reason", required=True)
     sub.add_parser("review-report")
     sub.add_parser("review-console", help="中文執行者操作選單")
+    sub.add_parser("dyad-console", help="永久親子追蹤中心，不發送訊息")
+    dyad_preview = sub.add_parser("dyad-preview", help="唯讀預覽登記及衝突")
+    dyad_preview.add_argument("--output", type=Path)
+    sub.add_parser("dyad-report")
+    invite_export = sub.add_parser("dyad-invitations")
+    invite_export.add_argument("--output", type=Path, required=True)
+    for name in ("dyad-record-invitation", "dyad-adjudicate"):
+        p = sub.add_parser(name)
+        p.add_argument("request", type=Path)
+    sub.add_parser("dyad-backup")
+    dyad_restore = sub.add_parser("dyad-restore")
+    dyad_restore.add_argument("bundle", type=Path)
+    dyad_restore.add_argument("--main-backup", required=True, type=Path)
+    dyad_restore.add_argument("--destination", required=True, type=Path)
     for name in ["publish", "rollback"]:
         p = sub.add_parser(name)
         p.add_argument("release_id")
@@ -200,6 +214,36 @@ def main():
                 result = watch_once(cfg)
             elif args.command == "schedule":
                 result = schedule(args.config, args.install)
+            elif args.command.startswith("dyad-"):
+                from . import dyad_operator as operator
+                if args.command == "dyad-console":
+                    result = operator.console(cfg)
+                elif args.command == "dyad-preview":
+                    result = operator.preview(cfg)
+                    if args.output:
+                        from .dyads import safe_tracking_rows
+                        from .outputs import write_excel
+                        write_excel(args.output, {"登記預覽": safe_tracking_rows(result['rows']),
+                                    "待裁定": safe_tracking_rows([r for r in result['rows'] if r['registration_state'] not in {'active','new'}])}, tracking=True)
+                        result = {k:v for k,v in result.items() if k != 'rows'} | {'output':str(args.output.resolve())}
+                elif args.command == "dyad-report":
+                    result = operator.report(cfg)
+                elif args.command == "dyad-invitations":
+                    result = operator.export_invitations(cfg, args.output)
+                elif args.command == "dyad-adjudicate":
+                    result = operator.adjudicate(cfg, json.loads(args.request.read_text()))
+                elif args.command == "dyad-record-invitation":
+                    result = operator.record_invitation(cfg, json.loads(args.request.read_text()))
+                elif args.command == "dyad-restore":
+                    result = operator.restore_bundle(args.bundle, args.main_backup, args.destination)
+                elif args.command == "dyad-backup":
+                    with writer_lock(state):
+                        db = connect(state)
+                        try:
+                            operator.recovery_check(db, cfg)
+                            result = {'bundle':operator.backup_tracking(db, cfg, 'operator')}
+                        finally:
+                            db.close()
             elif args.command in {"review-cards", "review-receive", "review-preview", "review-approve", "review-apply", "review-resolve", "review-report", "review-reopen", "review-console"}:
                 from . import review_core as core
                 from . import review_operator as operator
@@ -276,7 +320,7 @@ def main():
                                 r = verify_release(db, latest["release_id"])
                                 result = {"checks_passed": True, "release_id": latest["release_id"], "step": args.step or "all", "counts": json.loads(r["stats_json"])["stage_counts"]}
                             else:
-                                result = publish_release(db, cfg, args.release_id)
+                                result = publish_release(db, cfg, args.release_id, rollback=args.command == 'rollback')
                         elif args.command == "review-export":
                             from .review import export_review
                             result = export_review(db, cfg, args.output, args.limit)
