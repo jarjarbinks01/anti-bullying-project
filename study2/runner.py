@@ -24,6 +24,7 @@ def program_hash() -> str:
 
 def fingerprint(cfg, manifest, db):
     from .legacy import legacy_files
+    from .dyads import administrative_fingerprint
     inputs = sorted(manifest["sources"], key=lambda r: r["source_id"])
     return digest({"inputs": inputs, "code": program_hash(), "mappings": cfg["mapping_hashes"],
                    "dictionary": file_hash(Path(cfg["state_dir"]) / "school_dictionary.xlsx"),
@@ -31,7 +32,8 @@ def fingerprint(cfg, manifest, db):
                    "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")],
                    "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy")],
                    "source_folder": cfg.get("source_folder", "1.1_raw_file"), "source_registry": cfg["sources"],
-                   "legacy_sources": {str(p.relative_to(cfg["project_root"])):file_hash(p) for p in legacy_files(cfg)}})
+                   "legacy_sources": {str(p.relative_to(cfg["project_root"])):file_hash(p) for p in legacy_files(cfg)},
+                   "permanent_registration": administrative_fingerprint(db)})
 
 
 def baseline_comparison(cfg, summary):
@@ -59,6 +61,10 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
     with writer_lock(state):
         db = connect(state)
         recover_pointer(db, cfg)
+        from . import dyads
+        from .dyad_operator import backup_tracking, recovery_check
+        recovery_check(db, cfg)
+        dyads.migrate(db)
         run_id = "RUN_" + uuid.uuid4().hex
         start_code_hash = program_hash()
         folder = Path(cfg["release_dir"]) / run_id
@@ -118,10 +124,17 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                 for event in events:
                     db.execute("INSERT INTO decision_events VALUES(?,?,?,?)", (run_id, event["decision_id"], event["status"], event["message"]))
             labels = validation_report(db, cases, records)
+            dyad_rows = dyads.stage(db, run_id, records, cases, cfg)
+            # Persist reservations before output/publication so a retry reuses IDs.
+            backup_tracking(db, cfg, "staged_" + run_id)
+            fp = fingerprint(cfg, manifest, db)
+            with db:
+                db.execute("UPDATE runs SET fingerprint=? WHERE run_id=?", (fp, run_id))
             secure_directory(folder)
             online, _, _ = modules(cfg)
             print("Writing versioned outputs and audit tables", flush=True)
-            summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs)
+            summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows)
+            summary["permanent_registration"] = dyads.validate_staging(db, run_id, records, cases, cfg)
             summary["manual_decisions_reopened"] = sum(e["status"] == "reopened" for e in events)
             summary["legacy_corrections_pending"] = sum(r["migration_status"].startswith("pending") for r in migration)
             summary["legacy_corrections_scope"] = "not_applied" if cfg.get("source_scope") in {"qualtrics_only", "merged_abcd"} else "migration_attempted"
@@ -198,6 +211,8 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             with snapshot:
                 snapshot.execute("INSERT OR REPLACE INTO publication VALUES(1,?)", (run_id,))
                 snapshot.execute("UPDATE runs SET status='published' WHERE run_id=?", (run_id,))
+                snapshot.execute("UPDATE dyad_registry SET lifecycle=(SELECT state FROM dyad_memberships WHERE run_id=? AND dyad_id=dyad_registry.dyad_id) WHERE lifecycle!='retired' AND dyad_id IN (SELECT dyad_id FROM dyad_memberships WHERE run_id=?)", (run_id, run_id))
+                snapshot.execute('UPDATE dyad_registry SET first_published_run_id=? WHERE first_published_run_id IS NULL AND dyad_id IN (SELECT dyad_id FROM dyad_memberships WHERE run_id=?)', (run_id,run_id))
             snapshot.close()
             atomic_json(folder / "backup.sha256.json", {"backup.sqlite": file_hash(folder / "backup.sqlite")})
             if publish:
@@ -267,19 +282,33 @@ def check_source_conservation(db, records):
         raise PipelineError(f"Full source snapshot lost {len(missing)} registered submissions; possible identity-key change or incomplete export. Review before publication")
 
 
-def publish_release(db, cfg, release_id):
+def publish_release(db, cfg, release_id, rollback=False):
     row = verify_release(db, release_id)
     # Newly collected NONMATCH labels must also guard publication of older releases.
     cases = [json.loads(r[0]) for r in db.execute("SELECT payload_json FROM release_candidates WHERE release_id=?", (release_id,))]
     validation_report(db, cases)
     from .review_core import backup_workspace
     review_backup = backup_workspace(cfg, "publish_" + release_id)
+    from .dyad_operator import backup_tracking, recovery_check
+    from .dyads import publish_memberships
+    recovery_check(db, cfg)
+    if json.loads(row['stats_json']).get('permanent_registration') and not rollback:
+        from . import dyads
+        records = dyads.scientific_records(db, row['run_id'])
+        dyads.validate_staging(db, row['run_id'], records, cases, cfg)
+        manifest = json.loads((Path(row['path']) / 'run_manifest.json').read_text())
+        if fingerprint(cfg, manifest['inputs'], db) != manifest['fingerprint']:
+            raise PipelineError('Source, rules or permanent registration changed after validation; rerun before publication')
+    tracking_backup = backup_tracking(db, cfg, "before_publish_" + release_id)
     pointer = Path(cfg["release_dir"]) / "CURRENT.json"
     previous = json.loads(pointer.read_text()) if pointer.exists() else None
     try:
         with db:
             db.execute("INSERT OR REPLACE INTO publication VALUES(1,?)", (release_id,))
             db.execute("UPDATE runs SET status='published' WHERE run_id=?", (row["run_id"],))
+            if not rollback:
+                publish_memberships(db, row["run_id"])
+            tracking_after = backup_tracking(db, cfg, "after_publish_" + release_id, promote=False)
             atomic_json(pointer, {"release_id": release_id, "path": row["path"], "published_at": utcnow()})
     except Exception:
         if previous is not None:
@@ -289,7 +318,18 @@ def publish_release(db, cfg, release_id):
         raise
     failure = Path(cfg["state_dir"]) / "last_failure.json"
     failure.unlink(missing_ok=True)
-    return {"release_id": release_id, "path": row["path"], "review_workspace_backup": review_backup}
+    tracking_manifest = json.loads((Path(tracking_after) / 'manifest.json').read_text())
+    # The complete backup was verified before switching the release. Updating
+    # the derived recovery hint after commit must not mark a valid release failed.
+    recovery_hint_warning = None
+    try:
+        atomic_json(Path(cfg['state_dir']) / 'DYAD_LEDGER.json',
+                    {'bundle': tracking_after, 'hash': tracking_manifest['tracking_hash']})
+    except OSError:
+        recovery_hint_warning = 'Tracking backup is complete; recovery hint needs repair using tracking_after_backup'
+    return {"release_id": release_id, "path": row["path"], "review_workspace_backup": review_backup,
+            "tracking_before_backup": tracking_backup, "tracking_after_backup": tracking_after,
+            "recovery_hint_warning": recovery_hint_warning}
 
 
 def recover_pointer(db, cfg):

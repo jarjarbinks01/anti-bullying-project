@@ -117,7 +117,7 @@ def imported_source_counts(release_id, state_dir, run_id):
     return counts.drop(columns="source_label")
 
 
-overview, analysis, evidence_tab, method = st.tabs(["資料品質及進度", "描述統計", "配對證據", "統計口徑"])
+overview, analysis, evidence_tab, method, tracking_tab = st.tabs(["資料品質及進度", "描述統計", "配對證據", "統計口徑", "親子追蹤"])
 with overview:
     cols = st.columns(4)
     for c, label, value in zip(cols, ["提交記錄", "學生跨期 AC", "同一成人跨期 BD" if summary.get("bd_requires_same_adult") else "家長回應跨期配對", "跨期親子 EF"], [summary["submissions"], summary["AC"], summary["BD"], summary["EF"]]):
@@ -328,3 +328,100 @@ with evidence_tab:
         if len(display_evidence) > 500:
             st.caption(f"表格預覽前500宗；下載包含全部 {len(display_evidence):,} 宗篩選結果。")
         st.download_button("下載目前候選證據摘要", display_evidence.to_csv(index=False).encode("utf-8-sig"), "study2-pair-evidence.csv", "text/csv")
+
+with tracking_tab:
+    from study2.dyad_operator import STATES, FOLLOWUPS, readable_reason, safe_note
+    st.subheader("永久親子追蹤")
+    st.caption("每個永久ID追蹤同一孩子的家庭，換填卷家長仍沿用。兄弟姊妹各自登記。家長是否同一成人仍按BD規則判斷。")
+    path = release_path / 'dyad_tracking.parquet'
+    if not path.exists():
+        st.info("目前發布版本尚未加入永久親子ID。登記及驗證完成後，此頁會顯示家庭追蹤。")
+    else:
+        @st.cache_data(show_spinner=False)
+        def tracking_data(release_id, path):
+            return pd.read_parquet(path)
+        tracked = tracking_data(release['release_id'], str(path)).copy()
+        counts = st.columns(4)
+        counts[0].metric("有效親子追蹤ID", int(tracked['registration_state'].eq('active').sum()))
+        counts[1].metric("暫停／尚待登記", int(tracked['registration_state'].ne('active').sum()))
+        counts[2].metric("兩者完成合資格T1", int(tracked['followup_status'].eq('both_complete').sum()))
+        counts[3].metric("至少一個角色未完成", int(tracked['followup_status'].isin(['student_only','parent_only','neither_complete']).sum()))
+        st.caption("上列數量按目前發布的追蹤對應計算。收到回應、被選為合資格T1及已發邀請是不同狀態。待裁定項目不等於另一個已確認家庭。")
+        controls = st.columns(3)
+        search = controls[0].text_input("搜尋永久親子ID", key='dyad_search').strip()
+        states = controls[1].multiselect("登記狀態", sorted(tracked['registration_state'].dropna().unique()),
+            format_func=lambda x: STATES.get(x,x), key='dyad_states')
+        followups = controls[2].multiselect("家庭T1完成情況", sorted(tracked['followup_status'].dropna().unique()),
+            format_func=lambda x: FOLLOWUPS.get(x,x), key='dyad_followups')
+        if search:
+            search_db = connect(Path(cfg['state_dir']), readonly=True)
+            try:
+                from study2.dyads import canonical_id
+                aliases = {r[0]:r[1] for r in search_db.execute('SELECT alias_id,canonical_id FROM dyad_aliases')}
+                target = canonical_id(search,aliases)
+            finally:
+                search_db.close()
+            if target != search:
+                st.caption(f"此舊ID已經批准合併，現在對應：{target}。舊登記及邀請歷史保留。")
+            tracked = tracked[tracked['dyad_id'].fillna('').str.contains(target, case=False, regex=False)]
+        if states:
+            tracked = tracked[tracked['registration_state'].isin(states)]
+        if followups:
+            tracked = tracked[tracked['followup_status'].isin(followups)]
+        admin_db = connect(Path(cfg['state_dir']), readonly=True)
+        try:
+            from study2.dyads import exists
+            if exists(admin_db):
+                lifecycle = {r[0]:r[1] for r in admin_db.execute('SELECT dyad_id,lifecycle FROM dyad_registry')}
+                tracked['administrative_state'] = tracked['dyad_id'].map(lifecycle)
+                updated = admin_db.execute('SELECT MAX(at) FROM dyad_events').fetchone()[0]
+                st.caption(f"行政登記更新時間：{updated or '尚未有紀錄'}。行政暫停／裁定可早於下一次研究發布；受控邀請匯出會重新驗證身份、日期及登記。")
+            names = {'dyad_id':'永久親子ID','child_id':'本版孩子群組ID','registration_state':'本版登記狀態',
+                'administrative_state':'目前行政狀態','registration_reason':'待處理原因','followup_status':'家庭T1完成情況',
+                'student_school':'學生T0學校','parent_school':'家長T0所指學校',
+                'student_t0_at':'學生T0日期','parent_t0_at':'家長T0日期','student_t1_at':'學生選定T1日期','parent_t1_at':'家長選定T1日期',
+                'student_due_at':'學生最早T1日期','parent_due_at':'家長最早T1日期','family_due_at':'共同邀請建議日期',
+                'student_date_basis':'學生T0日期依據','parent_date_basis':'家長T0日期依據',
+                'student_received_count':'學生其他回應數','parent_received_count':'家長其他回應數',
+                'student_short_interval_count':'學生未滿90日回應','parent_short_interval_count':'家長未滿90日回應',
+                'student_other_count':'學生其他後續／重填','parent_other_count':'家長其他後續／重填',
+                'identity_candidate_pending':'待核實身份候選數','adult_status':'填卷成人身份','adult_rule':'成人判斷依據'}
+            names.update(registered_student_id='首次登記學生提交',registered_parent_id='首次登記家長提交',
+                         registered_at='永久登記時間',first_published_run_id='首次發布版本')
+            view = tracked[[c for c in names if c in tracked]].copy()
+            for col in ['registration_state','administrative_state']:
+                if col in view:
+                    view[col] = view[col].map(lambda x: {**STATES,'reserved':'待首次發布','retired':'已停用'}.get(x,x))
+            view['followup_status'] = view['followup_status'].map(lambda x: FOLLOWUPS.get(x,x))
+            view['registration_reason'] = view['registration_reason'].map(readable_reason)
+            if 'adult_status' in view:
+                view['adult_status'] = view['adult_status'].map({'same':'同一成人','different':'成人不同／關係更換','unconfirmed':'未確認'})
+            view = view.rename(columns=names)
+            st.dataframe(view, hide_index=True, width='stretch')
+            st.download_button("下載目前家庭追蹤摘要", view.to_csv(index=False).encode('utf-8-sig'),
+                               'study2-family-tracking.csv', 'text/csv')
+            st.caption("摘要不包含完整電話、電郵或生日。指定執行者使用 Dyad Centre 匯出受控邀請清單及保存實際發送紀錄；此頁不會發送訊息。")
+            choices = tracked['dyad_id'].dropna().unique().tolist()
+            selected_id = st.selectbox("查看登記及邀請歷史", [''] + sorted(choices),
+                                        format_func=lambda x: x or '請選擇永久親子ID', key='dyad_history')
+            if selected_id:
+                from study2.dyads import related_ids
+                family_ids = related_ids(admin_db,selected_id)
+                marks = ','.join('?' for _ in family_ids)
+                events = pd.read_sql_query(f'SELECT at,kind,actor,reason FROM dyad_events WHERE dyad_id IN ({marks}) ORDER BY at,event_id', admin_db, params=family_ids)
+                events['reason'] = events['reason'].map(safe_note)
+                st.dataframe(events.rename(columns={'at':'時間','kind':'操作','actor':'執行者','reason':'理由'}), hide_index=True, width='stretch')
+                invitation_events = []
+                for item in admin_db.execute(f'SELECT at,payload_json FROM dyad_invitation_events WHERE dyad_id IN ({marks}) ORDER BY at,operation_id', family_ids):
+                    payload = json.loads(item[1])
+                    invitation_events.append({'保存時間':item[0], '角色':{'student':'學生','parent':'家長'}.get(payload['role']),
+                        '事件':{'sent':'已發送','failed':'發送失敗','stop':'停止邀請','resume':'恢復邀請'}.get(payload['action']),
+                        '實際日期':payload['occurred_at'],'執行者':payload['operator'],'方式':payload.get('method'),
+                        '結果':safe_note(payload.get('result')),'理由':safe_note(payload['reason']),
+                        '早於最早T1日期':payload.get('before_eligibility_date',False)})
+                if invitation_events:
+                    st.dataframe(pd.DataFrame(invitation_events), hide_index=True, width='stretch')
+                else:
+                    st.caption("沒有已保存的邀請紀錄。已收到T1不代表曾記錄發送邀請。")
+        finally:
+            admin_db.close()

@@ -36,7 +36,7 @@ def test_pointer_write_failure_keeps_published_database(tmp_path):
     db = connect(tmp_path)
     releases(db,tmp_path)
     cfg={"release_dir":str(tmp_path),"state_dir":str(tmp_path)}
-    with patch("study2.runner.verify_release", return_value={"run_id":"new","path":str(tmp_path)}), patch("study2.runner.atomic_json",side_effect=OSError("Injected write failure")):
+    with patch("study2.runner.verify_release", return_value={"run_id":"new","path":str(tmp_path),"stats_json":"{}"}), patch("study2.runner.atomic_json",side_effect=OSError("Injected write failure")):
         with pytest.raises(OSError):
             publish_release(db,cfg,"new")
     assert current(db)["release_id"] == "old"

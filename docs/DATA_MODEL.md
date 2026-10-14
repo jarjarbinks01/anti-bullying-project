@@ -50,4 +50,16 @@ parent 的 identity_members 指向「回應所指孩子」。BD 另要求成人�
 
 共用接口位於 `study2/review_core.py`：`create_package`、`submit_reviews`、`preview_batch`、`approve_batch`、`apply_batch`。Excel adapter 位於 `study2/review_excel.py`，只處理輸出、識別及只讀內容校驗。舊平面工具亦使用 `validate_review_rows`／`commit_review_rows`，保留原有嚴格版本規則。
 
+## 永久親子追蹤
+
+`study2/dyads.py` 提供唯讀 `plan`、預留 ID 的 `stage`、發布前 `validate_staging` 及發布交易中的 `publish_memberships`。它讀取既有研究結果，不參與身份規則或量表計分。
+
+`dyad_registry` 保存隨機永久 ID、不可覆寫的首次 T0 學生／家長提交、最初預留的 run、建立時間與身份證據。`first_published_run_id` 在首次成功發布時固定，與可能中斷的預留 run 分開。生命週期狀態另行更新；ID 永不刪除或重用。
+
+`dyad_lineage` 保存已確認提交的身份證據簽章及目前是否有效。人工裁定可以停用舊追蹤依據，歷史仍保存。`dyad_memberships` 固定每個 run 的家庭、孩子群組、角色輪次及完成狀態。群組拆分或多個登記合併時，不自動挑選歸屬。
+
+`dyad_events`、`dyad_resolutions` 和 `dyad_aliases` 保存有固定操作 ID 的裁定、前後依據與合併別名。`dyad_invitation_events` 是人工保存的行政事件，不推定問卷已收到，也不發送訊息。相同操作及相同實際邀請事件不重複寫入。
+
+原始 `submission_id`、來源版本及審核規則不受行政 ID 影響。研究回退保留較新的行政歷史；追蹤 bundle 另保存發布後新增的登記、邀請、裁定及完整審核工作區。操作及還原方法見 [永久親子追蹤指南](DYAD_TRACKING_OPERATIONS.md)。
+
 主庫新增 `review_applications`，固定批次 ID 與正式指令、核實標記在同一交易提交，避免兩個資料庫之間中斷導致重複套用。審核者答案永遠先保存在工作區；發布資料不讀未批准答案。核實標記的 `pre_review` 保存修正前判斷，工作區另保留全部審核／裁定歷史。

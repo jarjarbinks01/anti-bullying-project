@@ -48,6 +48,7 @@ The dashboard opens at `http://127.0.0.1:8501` and reads only the published rele
 - [Data model and stable identifiers](docs/DATA_MODEL.md)
 - [Reviewer instructions](docs/REVIEW_CARDS_COLLEAGUES.md)
 - [Operator approval and application workflow](docs/REVIEW_CARDS_OPERATIONS.md)
+- [Permanent child-family IDs, invitations and recovery](docs/DYAD_TRACKING_OPERATIONS.md)
 
 The dashboard separates final sample counts from candidate comparisons. Program checks and synthetic tests verify implementation; they do not establish the accuracy of all real-world matches.
 

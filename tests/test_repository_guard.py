@@ -28,7 +28,9 @@ def test_data_disguised_as_code_and_symlink_are_rejected():
 
 
 def test_private_identifiers_emails_and_user_paths_are_rejected_without_echoing_values():
-    values = ['SUB_' + 'a' * 26, 'person' + '@' + 'private-school.hk', '/Users/' + 'private-user/data/file']
+    values = ['SUB_' + 'a' * 26, 'DYAD_' + 'b' * 32, 'INV_' + 'c' * 32,
+              'DRES_' + 'd' * 32, 'DEVENT_' + 'e' * 64,
+              'person' + '@' + 'private-school.hk', '/Users/' + 'private-user/data/file']
     for value in values:
         issues = guard.inspect_blob('study2/new.py', value.encode())
         assert issues
