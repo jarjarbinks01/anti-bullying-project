@@ -52,6 +52,34 @@ The dashboard opens at `http://127.0.0.1:8501` and reads only the published rele
 
 The dashboard separates final sample counts from candidate comparisons. Program checks and synthetic tests verify implementation; they do not establish the accuracy of all real-world matches.
 
+## Storage maintenance and recovery
+
+New workspaces store processed record values once and retain per-run references. Review packages retain ordered task references and complete shared evidence components. Historical IDs, answers and scientific runs remain readable through the legacy interfaces.
+
+The compact storage adapter also shares unchanged record projections, candidate payloads and family membership payloads. It preserves every per-run association and reconstructs the original SQL interfaces. Candidate exports use stable case ordering; final sample worksheet ordering remains unchanged.
+
+```sh
+.venv/bin/python -m study2 storage-report
+.venv/bin/python -m study2 storage-migrate --destination /path/to/new-private-state
+.venv/bin/python -m study2 checkpoint
+.venv/bin/python -m study2 checkpoint-restore /path/to/CHECKPOINT --destination /path/to/new-private-state
+.venv/bin/python -m study2 storage-gc
+```
+
+Migration builds and verifies a private copy. It does not activate that copy. Activation requires preservation and rule-compatibility proofs, a verified portable checkpoint, stopped clients and a durable journal for both databases. Interrupted activation restores the original pair before either database opens.
+
+The checkpoint policy `{"latest_complete_only": true}` keeps one latest verified complete checkpoint. A replacement is recovered and checked before the previous checkpoint is removed. It contains main data, review history, administrative state, configuration, code and required source assets. Plain SQLite and gzip legacy archives remain supported when their files are retained. A pruned historical release still has scientific outputs but no standalone disaster-recovery file.
+
+This policy also replaces older full review and administrative backup copies. Their history remains in the live databases and latest complete checkpoint. Retention receipts remain at the old paths. An unchanged main or review archive is reused during checkpoint replacement, and unchanged operations reuse the whole checkpoint. `dyad-backup` uses the complete checkpoint under this policy.
+
+Use the path in the private state's `CURRENT_CHECKPOINT.json` for recovery. Restore into a new directory, then use its `config.restored.json`. Its `code` directory contains the saved implementation and mappings, and its `source_project` contains the exact input files. Install the saved dependencies in a separate environment and run from the restored `code` directory. Validate the current release and administrative history before redirecting operators or the scheduler to that configuration. Do not initialise a source registry during recovery.
+
+`validate` checks retained scientific outputs, including the logical content of compressed legacy audit files. `rollback` changes the published scientific release and retains administrative history; source/rule and review safeguards still apply. `checkpoint-restore` recovers the complete main/review pair and the newer administrative overlay. A `backup.retention.json` or review retention receipt identifies a removed physical recovery copy. Use the latest complete checkpoint when that old copy is unavailable.
+
+An operation can commit successfully while checkpoint creation fails, for example when the disk fills. Its result includes `checkpoint_warning` and the state has `CHECKPOINT_PENDING.json`. Retry `checkpoint` after resolving the cause. The previous verified checkpoint is retained throughout the failure. Storage format migration alone does not publish a new scientific release.
+
+`storage-gc` is a dry run. Add `--apply` to remove only objects outside all retained run, source-version, package, task and checkpoint references. Neither mode deletes research records. Keep active databases and temporary recovery files outside synchronized folders. Storage reports identify cloud placeholders through metadata without downloading them.
+
 ## Develop and push safely
 
 ```sh

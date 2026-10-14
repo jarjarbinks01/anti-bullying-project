@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import uuid
@@ -11,7 +12,7 @@ from pathlib import Path
 from . import dyads
 from .common import PipelineError, atomic_json, digest, dumps, file_hash, secure_directory, text, timestamp, utcnow
 from .outputs import write_excel
-from .store import connect, current, writer_lock
+from .store import backup_path, connect, current, writer_lock
 
 TABLES = ('dyad_schema', 'dyad_registry', 'dyad_lineage', 'dyad_memberships', 'dyad_events',
           'dyad_resolutions', 'dyad_aliases', 'dyad_invitation_events')
@@ -76,16 +77,23 @@ def require_published_reviews(db, release):
         if applied - markers:
             raise PipelineError('審核工作區有已套用但主資料庫缺少的批次；請先恢復人工裁定、重跑及發布，再處理邀請')
     path = Path(release['path']) / 'backup.sqlite'
-    if not path.is_file():
+    from .publication_baseline import read_baseline
+    baseline=read_baseline(release['path'],release['release_id'])
+    if baseline:
+        if _review_revision(db)!=baseline['review_revision']:
+            raise PipelineError('人工裁定或核實標記已更新但尚未發布；請先重跑及發布，再匯出或新增邀請紀錄')
+        return
+    if not path.is_file() and not path.with_name(path.name + '.gz').is_file():
         raise PipelineError('發布版本缺少人工裁定基線備份，不能匯出或新增邀請紀錄')
-    snapshot = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
-    snapshot.row_factory = sqlite3.Row
-    try:
-        expected = _review_revision(snapshot)
-    except sqlite3.DatabaseError:
-        raise PipelineError('發布版本的人工裁定基線無法核對，不能匯出或新增邀請紀錄') from None
-    finally:
-        snapshot.close()
+    with backup_path(path) as restored:
+        snapshot = sqlite3.connect(restored.resolve().as_uri() + '?mode=ro', uri=True)
+        snapshot.row_factory = sqlite3.Row
+        try:
+            expected = _review_revision(snapshot)
+        except sqlite3.DatabaseError:
+            raise PipelineError('發布版本的人工裁定基線無法核對，不能匯出或新增邀請紀錄') from None
+        finally:
+            snapshot.close()
     if _review_revision(db) != expected:
         raise PipelineError('人工裁定或核實標記已更新但尚未發布；請先重跑及發布，再匯出或新增邀請紀錄')
 
@@ -121,7 +129,12 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
     ledger.chmod(0o600)
     review = backup_workspace(cfg, 'dyad_' + reason)
     if review:
-        shutil.copy2(review, folder / 'review.sqlite')
+        # Both paths are immutable snapshots. Share their storage without
+        # linking the live workspace; deleting either path keeps the other.
+        try:
+            os.link(review, folder / 'review.sqlite')
+        except OSError:
+            shutil.copy2(review, folder / 'review.sqlite')
         (folder / 'review.sqlite').chmod(0o600)
     release = current(db)
     manifest = {'at': utcnow(), 'reason': reason, 'release_id': release['release_id'] if release else None,
@@ -137,13 +150,20 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
 
 def verify_bundle(folder):
     folder = Path(folder)
+    if (folder/'tracking.retention.json').is_file():
+        raise PipelineError('This physical administrative backup was pruned; restore the latest complete checkpoint')
     manifest = json.loads((folder / 'manifest.json').read_text())
     if manifest.get('schema_version') != dyads.SCHEMA_VERSION:
         raise PipelineError('不支援此登記備份格式')
     for name, expected in manifest['files'].items():
         if Path(name).name != name or file_hash(folder / name) != expected:
             raise PipelineError('登記備份指紋不符')
-    data = json.loads((folder / 'tracking.json').read_text())['tables']
+    if (folder/'tracking.json').is_file():data=json.loads((folder/'tracking.json').read_text())['tables']
+    else:
+        import gzip
+        try:
+            with gzip.open(folder/'tracking.json.gz','rt',encoding='utf-8') as stream:data=json.load(stream)['tables']
+        except (OSError,EOFError,ValueError) as error:raise PipelineError('Administrative checkpoint content is corrupt') from error
     if digest(data) != manifest['tracking_hash'] or set(data) not in (set(), set(TABLES)):
         raise PipelineError('登記備份內容不完整')
     if (folder / 'review.sqlite').exists():
@@ -205,6 +225,11 @@ def _require_restore_history(origin, data):
 
 def restore_bundle(folder, main_backup, destination):
     """Restore to a new state directory; never overwrite live databases."""
+    with backup_path(main_backup) as restored:
+        return _restore_bundle(folder, restored, destination)
+
+
+def _restore_bundle(folder, main_backup, destination):
     manifest, data = verify_bundle(folder)
     destination = Path(destination)
     if destination.exists():
@@ -581,3 +606,8 @@ def console(cfg):
                 print('請輸入0至6。')
         except (PipelineError, ValueError, OSError) as error:
             print('未保存：' + str(error))
+
+
+from .checkpoints import protect_mutation
+adjudicate=protect_mutation(adjudicate)
+record_invitation=protect_mutation(record_invitation)

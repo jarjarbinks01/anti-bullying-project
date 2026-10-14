@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .adapters import discover, make_manifest, mapping_module, modules
 from .common import PipelineError, atomic_json, dumps, file_hash, load_config, secure_directory, utcnow
-from .store import connect, current, writer_lock
+from .store import backup_path, connect, current, writer_lock
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = PACKAGE_ROOT / "config.local.json"
@@ -31,6 +31,7 @@ def initialize(project: Path, config_path: Path, state: Path | None = None, sour
     for name in names:
         shutil.copy2(source_scripts / name, frozen / name)
     cfg = {"config_version": 1, "project_root": str(project.resolve()), "state_dir": str(state.resolve()),
+           "checkpoint_policy": {"latest_complete_only": True},
            "release_dir": str(PACKAGE_ROOT / "releases"), "inbox_dir": str(PACKAGE_ROOT / "inbox"),
            "mapping_dir": str(frozen), "mapping_hashes": {n: file_hash(frozen / n) for n in names},
            "duplicate_days": 30, "minimum_followup_days": 90, "stale_after_days": 8,
@@ -192,6 +193,15 @@ def main():
     restore.add_argument("--destination", required=True, type=Path)
     sub.add_parser("status")
     sub.add_parser("watch")
+    sub.add_parser('storage-report')
+    migrate=sub.add_parser('storage-migrate')
+    migrate.add_argument('--destination',required=True,type=Path)
+    gc=sub.add_parser('storage-gc')
+    gc.add_argument('--apply',action='store_true')
+    sub.add_parser('checkpoint')
+    checkpoint_restore=sub.add_parser('checkpoint-restore')
+    checkpoint_restore.add_argument('checkpoint',type=Path)
+    checkpoint_restore.add_argument('--destination',required=True,type=Path)
     sched = sub.add_parser("schedule")
     sched.add_argument("--install", action="store_true")
     sub.add_parser("dashboard")
@@ -207,6 +217,21 @@ def main():
                 path = args.output or Path(cfg["inbox_dir"]) / "current.ready.json"
                 atomic_json(path, result)
                 result = {"manifest": str(path), "sources": len(result["sources"])}
+            elif args.command=='storage-report':
+                from .maintenance import storage_report
+                result=storage_report(cfg)
+            elif args.command=='storage-migrate':
+                from .maintenance import migrate_copy
+                result=migrate_copy(cfg,args.destination)
+            elif args.command=='storage-gc':
+                from .maintenance import storage_gc
+                result=storage_gc(cfg,args.apply)
+            elif args.command=='checkpoint':
+                from .checkpoints import save_checkpoint
+                result=save_checkpoint(cfg,'operator',force=True)
+            elif args.command=='checkpoint-restore':
+                from .checkpoints import restore_checkpoint
+                result=restore_checkpoint(args.checkpoint,args.destination)
             elif args.command == "run":
                 from .runner import run
                 result = run(cfg, json.loads(args.manifest.read_text()), not args.no_publish, args.force)
@@ -237,13 +262,17 @@ def main():
                 elif args.command == "dyad-restore":
                     result = operator.restore_bundle(args.bundle, args.main_backup, args.destination)
                 elif args.command == "dyad-backup":
-                    with writer_lock(state):
-                        db = connect(state)
-                        try:
-                            operator.recovery_check(db, cfg)
-                            result = {'bundle':operator.backup_tracking(db, cfg, 'operator')}
-                        finally:
-                            db.close()
+                    if cfg.get('checkpoint_policy',{}).get('latest_complete_only'):
+                        from .checkpoints import save_checkpoint
+                        result=save_checkpoint(cfg,'dyad_operator',force=True)
+                    else:
+                        with writer_lock(state):
+                            db = connect(state)
+                            try:
+                                operator.recovery_check(db, cfg)
+                                result = {'bundle':operator.backup_tracking(db, cfg, 'operator')}
+                            finally:
+                                db.close()
             elif args.command in {"review-cards", "review-receive", "review-preview", "review-approve", "review-apply", "review-resolve", "review-report", "review-reopen", "review-console"}:
                 from . import review_core as core
                 from . import review_operator as operator
@@ -281,16 +310,19 @@ def main():
                 import sqlite3
                 if args.destination.exists():
                     raise PipelineError("Restore destination must be new; never overwrite a live database")
-                origin = sqlite3.connect(f"file:{args.backup.resolve()}?mode=ro", uri=True)
-                try:
-                    if origin.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                        raise PipelineError("Backup is not valid")
-                    target = sqlite3.connect(args.destination)
-                    origin.backup(target)
-                    target.close()
-                    args.destination.chmod(0o600)
-                finally:
-                    origin.close()
+                with backup_path(args.backup) as restored:
+                    origin = sqlite3.connect(restored.resolve().as_uri() + '?mode=ro', uri=True)
+                    try:
+                        if origin.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                            raise PipelineError("Backup is not valid")
+                        target = sqlite3.connect(args.destination)
+                        try:
+                            origin.backup(target)
+                        finally:
+                            target.close()
+                        args.destination.chmod(0o600)
+                    finally:
+                        origin.close()
                 result = {"restored_copy": str(args.destination)}
             elif args.command == "validate" and args.manifest:
                 from .adapters import check_manifest, input_records
@@ -329,6 +361,9 @@ def main():
                             result = import_review(db, cfg, args.workbook)
                     finally:
                         db.close()
+                if args.command in {'publish','rollback','review-import'}:
+                    from .checkpoints import checkpoint_committed_result
+                    result=checkpoint_committed_result(cfg,result,args.command)
         print(dumps(result))
     except (PipelineError, ValueError, OSError) as error:
         print("Pipeline stopped: " + str(error), file=sys.stderr)

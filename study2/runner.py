@@ -15,7 +15,9 @@ from .common import PipelineError, atomic_json, digest, dumps, file_hash, secure
 from .matching import assign_children, link_records, select_waves
 from .outputs import write_excel, write_outputs
 from .review import active_decisions, apply_field_decisions, validation_report
-from .store import backup, connect, current, ingest, writer_lock
+from .store import backup, backup_path, connect, current, ingest, writer_lock
+from .storage import read_records, store_record
+from .artifacts import artifact_cache, freeze_file, logical_hash
 
 
 def program_hash() -> str:
@@ -120,7 +122,7 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                                 rules_by_id[sid].add(case["rule"])
                 for r in records:
                     r["identity_rules"] = sorted(rules_by_id[r["submission_id"]])
-                    db.execute("INSERT INTO normalized_records VALUES(?,?,?)", (run_id, r["submission_id"], dumps({k: v for k, v in r.items() if k != "contacts"})))
+                    store_record(db, run_id, r["submission_id"], {k: v for k, v in r.items() if k != "contacts"})
                 for event in events:
                     db.execute("INSERT INTO decision_events VALUES(?,?,?,?)", (run_id, event["decision_id"], event["status"], event["message"]))
             labels = validation_report(db, cases, records)
@@ -133,7 +135,8 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             secure_directory(folder)
             online, _, _ = modules(cfg)
             print("Writing versioned outputs and audit tables", flush=True)
-            summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows)
+            with artifact_cache(state/'artifact_objects',folder):
+                summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows)
             summary["permanent_registration"] = dyads.validate_staging(db, run_id, records, cases, cfg)
             summary["manual_decisions_reopened"] = sum(e["status"] == "reopened" for e in events)
             summary["legacy_corrections_pending"] = sum(r["migration_status"].startswith("pending") for r in migration)
@@ -173,11 +176,13 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                 "dictionary_hash": file_hash(dictionary_path), "decision_ids": [d["decision_id"] for d in decisions]})
             reproducible = folder / "reproduce"
             secure_directory(reproducible)
-            shutil.copy2(dictionary_path, reproducible / "school_dictionary.xlsx")
+            freeze_file(dictionary_path,reproducible/'school_dictionary.xlsx',state/'artifact_objects')
             atomic_json(reproducible / "config.json", cfg)
-            shutil.copytree(Path(cfg["mapping_dir"]), reproducible / "mappings")
-            shutil.copytree(Path(__file__).parent, reproducible / "study2", ignore=shutil.ignore_patterns("__pycache__"))
-            shutil.copy2(Path(__file__).parent.parent / "dashboard.py", reproducible / "dashboard.py")
+            for source_directory,target_directory in [(Path(cfg['mapping_dir']),reproducible/'mappings'),(Path(__file__).parent,reproducible/'study2')]:
+                for p in source_directory.rglob('*'):
+                    if p.is_file() and '__pycache__' not in p.parts and not p.is_symlink():
+                        freeze_file(p,target_directory/p.relative_to(source_directory),state/'artifact_objects')
+            freeze_file(Path(__file__).parent.parent/'dashboard.py',reproducible/'dashboard.py',state/'artifact_objects')
             from .legacy import legacy_files
             for source_path in legacy_files(cfg):
                 target=reproducible/"legacy"/source_path.relative_to(cfg["project_root"])
@@ -190,7 +195,7 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             for source in manifest["sources"]:
                 name = source["file"]
                 if not (source_folder / name).exists():
-                    shutil.copy2(source_root(cfg) / name, source_folder / name)
+                    freeze_file(source_root(cfg)/name,source_folder/name,state/'artifact_objects')
             # Verify every source is unchanged after reading, before publication.
             check_manifest(cfg, manifest)
             if fingerprint(cfg,manifest,db)!=fp:
@@ -215,6 +220,8 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                 snapshot.execute('UPDATE dyad_registry SET first_published_run_id=? WHERE first_published_run_id IS NULL AND dyad_id IN (SELECT dyad_id FROM dyad_memberships WHERE run_id=?)', (run_id,run_id))
             snapshot.close()
             atomic_json(folder / "backup.sha256.json", {"backup.sqlite": file_hash(folder / "backup.sqlite")})
+            from .publication_baseline import ensure_baseline
+            ensure_baseline(folder,run_id)
             if publish:
                 publish_release(db, cfg, run_id)
             print(f"{'Published' if publish else 'Validated'} {run_id}", flush=True)
@@ -234,21 +241,28 @@ def verify_release(db, release_id):
     row = db.execute("SELECT r.*,n.status FROM releases r JOIN runs n ON r.run_id=n.run_id WHERE release_id=?", (release_id,)).fetchone()
     if not row or row["status"] not in {"validated", "published"}:
         raise PipelineError("Release does not exist or failed validation")
-    path = Path(row["path"])
+    result = dict(row)
+    locations = Path(db.execute('PRAGMA database_list').fetchone()[2]).parent/'release_locations.json'
+    if locations.exists():
+        result['path'] = json.loads(locations.read_text()).get(release_id,result['path'])
+    path = Path(result["path"])
     hashes = json.loads((path / "checksums.json").read_text())
     for name, expected in hashes.items():
-        if not (path / name).is_file() or file_hash(path / name) != expected:
+        if logical_hash(path/name) != expected:
             raise PipelineError("Published file checksum mismatch")
-    snapshot = sqlite3.connect(f"file:{path / 'backup.sqlite'}?mode=ro", uri=True)
     expected_backup = json.loads((path / "backup.sha256.json").read_text())["backup.sqlite"]
-    if file_hash(path / "backup.sqlite") != expected_backup:
-        raise PipelineError("Release backup checksum mismatch")
-    try:
-        if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise PipelineError("Release backup failed integrity check")
-    finally:
-        snapshot.close()
-    return dict(row)
+    if not (path/'backup.sqlite').exists() and not (path/'backup.sqlite.gz').exists():
+        if not (path/'backup.retention.json').exists():
+            raise PipelineError('Full recovery backup is unavailable without a retention record')
+        return result
+    with backup_path(path / 'backup.sqlite', expected_backup) as restored:
+        snapshot = sqlite3.connect(restored.resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise PipelineError("Release backup failed integrity check")
+        finally:
+            snapshot.close()
+    return result
 
 
 def check_unexpected_backfill(db, records):
@@ -256,7 +270,7 @@ def check_unexpected_backfill(db, records):
     release = current(db)
     if not release:
         return
-    prior = [json.loads(r[0]) for r in db.execute("SELECT payload_json FROM normalized_records WHERE run_id=?", (release["run_id"],))]
+    prior = list(read_records(db, release['run_id'], include_raw=False))
     seen = {r["submission_id"] for r in prior}
     baselines = {(r.get("child_id"), r["role"]): r for r in prior if r.get("selected_wave") == "T0"}
     from .common import timestamp
@@ -344,3 +358,7 @@ def recover_pointer(db, cfg):
         atomic_json(pointer, {"release_id": release["release_id"], "path": release["path"], "recovered_at": utcnow()})
     elif not release and pointer.exists():
         pointer.unlink()
+
+
+from .checkpoints import protect_mutation
+run=protect_mutation(run)

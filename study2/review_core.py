@@ -6,13 +6,14 @@ Only apply_batch acquires the main pipeline writer lock.
 from __future__ import annotations
 
 import json
+import copy
 import sqlite3
 import uuid
 from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
 
-from .common import PipelineError, digest, dumps, secure_directory, text, utcnow, file_hash
+from .common import PipelineError, atomic_json, digest, dumps, secure_directory, text, utcnow, file_hash
 from .matching import hard_conflict, identity_evidence, validate_manual_links
 from .respondents import adult_evidence
 from .review import active_decisions, commit_review_rows, release_records, validate_review_rows
@@ -38,12 +39,15 @@ CREATE TABLE IF NOT EXISTS followups(case_id TEXT PRIMARY KEY, task_id TEXT, sta
 
 def workspace(cfg):
     state = Path(cfg["state_dir"])
+    from .maintenance import recover_activation
+    recover_activation(state)
     secure_directory(state)
     path = state / "review.sqlite"
     db = sqlite3.connect(path, timeout=15)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
-    db.executescript(SCHEMA)
+    from .review_storage import prepare_workspace
+    prepare_workspace(db,SCHEMA)
     path.chmod(0o600)
     return db
 
@@ -59,6 +63,11 @@ def backup_workspace(cfg, reason="manual"):
         backup(db, path)
     finally:
         db.close()
+    # Keep legacy logical paths, sharing only verified immutable snapshots.
+    from .artifacts import publish_object, copy_object
+    h, obj = publish_object(Path(cfg['state_dir']) / 'artifact_objects', path)
+    copy_object(obj, path)
+    atomic_json(path.with_suffix('.sha256.json'), {'snapshot_sha256': h})
     return str(path)
 
 
@@ -68,8 +77,14 @@ def event(db, kind, target, payload):
 
 
 def rules_hash(cfg):
-    return digest({"review_rules": 1, "code": {name: file_hash(Path(__file__).parent / name)
-                  for name in ("matching.py", "respondents.py", "review_core.py", "review_hints.py")},
+    hashes={name:file_hash(Path(__file__).parent/name) for name in
+            ('matching.py','respondents.py','review_core.py','review_hints.py')}
+    compatibility=Path(cfg['state_dir'])/'review_rule_compatibility.json'
+    if compatibility.exists():
+        proof=json.loads(compatibility.read_text())
+        if proof.get('format_version')==1 and proof.get('verified') is True and proof.get('current_code')==hashes:
+            hashes=proof['original_code']
+    return digest({"review_rules": 1, "code": hashes,
                   "config": {k: cfg.get(k) for k in ("matching_policy", "date_policy", "duplicate_days",
                             "minimum_followup_days", "bd_requires_same_adult")}})
 
@@ -95,8 +110,8 @@ class Context:
         keys = {"submission_id","version_id","role","answer","source_id","source_label","location",
                 "school","dob","gender","grade","grade_raw","child_id","claimed_wave","selected_wave","observed_at",
                 "time_confidence","date_basis","status","wave_reason","school_type"}
-        for row in db.execute("SELECT json_remove(payload_json,'$.raw') FROM normalized_records WHERE run_id=?", (self.release['run_id'],)):
-            rec = json.loads(row[0])
+        from .storage import read_records
+        for rec in read_records(db,self.release['run_id'],include_raw=False):
             rec['school_type'] = rec.get('school_type') or rec['answer'].get('school_type')
             rec['answer'] = {k:v for k,v in rec['answer'].items() if k.startswith('contact_') or k in
                             {'Survey','student_demographics_02','adult_demographics_02','adult_demographics_05',
@@ -117,14 +132,26 @@ class Context:
         # Any new canonical decision invalidates a preview, even before rerunning.
         self.main_revision = digest({"decisions": [dict(d) for d in self.decisions],
             "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")]})
+        self._component_cache={}
 
     def snapshot(self, case_id):
+        case,component=self._component(case_id)
+        # Callers historically receive independent frozen dictionaries.
+        return {'case':case,**copy.deepcopy(component)}
+
+    def signature(self,case_id):
+        return self._component(case_id)[1]['signature']
+
+    def _component(self,case_id):
         case = self.cases.get(case_id)
         if not case or case["kind"] not in KINDS or not case.get("record_b"):
             raise PipelineError("個案已失效或不是兩份提交的身份比較：" + case_id)
         ids = {case["record_a"], case["record_b"]}
         if not ids <= self.records.keys():
             raise PipelineError("提交已失效，請重新派發：" + case_id)
+        cached=self._component_cache.get(case['record_a'])
+        if cached is not None:
+            return case,cached
         related = set(ids)
         pending = list(ids)
         # A competing candidate's group can change the interpretation of this pair.
@@ -153,9 +180,11 @@ class Context:
         constraints = [d["payload"] for d in self.decisions
                        if {d["payload"].get("record_a"), d["payload"].get("record_b")} & related]
         signature = digest({"evidence": evidence, "candidates": candidates, "rules": self.rules})
-        return {"case": case, "records": records, "candidates": candidates,
+        component={"records": records, "candidates": candidates,
                 "release_id": self.release["release_id"], "rules_hash": self.rules, "signature": signature,
                 "original_manual_constraints": constraints}
+        for sid in related:self._component_cache[sid]=component
+        return case,component
 
 
 def stratified_cases(cases, reviewer, limit):
@@ -192,10 +221,10 @@ def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=No
         ctx = Context(main, cfg)
         valid = [c for c in ctx.cases.values() if c["kind"] in kinds and c.get("record_b")]
         work.execute("BEGIN IMMEDIATE")
-        for old_task in work.execute("SELECT * FROM tasks WHERE state NOT IN ('cancelled','stale')").fetchall():
-            previous = json.loads(old_task["payload"])
+        from .review_storage import task_heads
+        for old_task in task_heads(work):
             try:
-                changed = ctx.snapshot(old_task["case_id"])["signature"] != previous["snapshot"]["signature"]
+                changed = ctx.signature(old_task["case_id"]) != old_task['signature']
             except PipelineError:
                 changed = True
             if changed:
@@ -750,3 +779,12 @@ def review_report(cfg):
                 "note": "分層審核樣本，不能推定整體 precision/recall；程式結論採用審核前快照"}
     finally:
         work.close()
+
+
+from .checkpoints import protect_mutation
+create_package=protect_mutation(create_package)
+submit_reviews=protect_mutation(submit_reviews)
+preview_batch=protect_mutation(preview_batch)
+approve_batch=protect_mutation(approve_batch)
+apply_batch=protect_mutation(apply_batch)
+reopen_tasks=protect_mutation(reopen_tasks)

@@ -62,6 +62,11 @@ def excel_safe(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def write_excel(path: Path, sheets: dict[str, list | pd.DataFrame], tracking=False) -> None:
+    from .artifacts import cached_excel
+    return cached_excel(path,sheets,tracking,lambda:_write_excel(path,sheets,tracking))
+
+
+def _write_excel(path: Path, sheets: dict[str, list | pd.DataFrame], tracking=False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, rows in sheets.items():
@@ -294,14 +299,13 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         row.update(review_warnings="；".join(c.get("review_warnings", [])),
                    review_warning_codes=";".join(c.get("review_warning_codes", [])))
         evidence.append(row)
-    pd.DataFrame(evidence).to_parquet(folder / "candidate_evidence.parquet", index=False)
+    evidence_frame=pd.DataFrame(evidence)
+    if 'case_id' in evidence_frame:evidence_frame=evidence_frame.sort_values('case_id')
+    evidence_frame.to_parquet(folder / "candidate_evidence.parquet", index=False)
     summary["case_kind_status_counts"] = {kind: dict(Counter(c["status"] for c in cases if c["kind"] == kind)) for kind in sorted({c["kind"] for c in cases})}
-    with (folder / "records.jsonl").open("w") as f:
-        for r in records:
-            f.write(dumps({k: v for k, v in r.items() if k != "contacts"}) + "\n")
-    with (folder / "cases.jsonl").open("w") as f:
-        for c in cases:
-            f.write(dumps(c) + "\n")
+    from .artifacts import write_json_lines
+    write_json_lines(folder/'records.jsonl.gz',({k:v for k,v in r.items() if k!='contacts'} for r in records))
+    write_json_lines(folder/'cases.jsonl.gz',sorted(cases,key=lambda c:c['case_id']))
     write_excel(folder / "audit.xlsx", {
         "counts": [{"metric": k, "value": dumps(v) if isinstance(v, dict) else v} for k, v in summary.items()],
         "school_review": pd.DataFrame(school_queue, columns=["normalized_key", "raw_name"]),
@@ -317,6 +321,8 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         tracking.to_parquet(folder / 'dyad_tracking.parquet', index=False)
         write_excel(folder / 'dyad_tracking.xlsx', {'家庭追蹤': tracking,
                     '待裁定': tracking[tracking['registration_state'] != 'active']}, tracking=True)
+    from .artifacts import freeze_file
+    for p in folder.glob('*.parquet'):freeze_file(p,p)
     return summary
 
 
