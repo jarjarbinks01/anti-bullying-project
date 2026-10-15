@@ -104,44 +104,58 @@ def _add_asset(folder,manifest,source,relative):
     manifest['files'][str(relative)]={'sha256':original,'restore_path':str(relative)}
 
 
-def _capture_assets(folder,manifest,cfg,main):
+def _asset_inventory(cfg,main):
+    """Use the same complete source inventory for freshness and capture."""
     from .store import current
-    from .dyad_operator import TABLES
     state=Path(cfg['state_dir']);release=current(main)
-    manifest['release_id']=release['release_id'] if release else None
-    atomic_json(folder/'checkpoint_config.json',cfg)
-    manifest['files']['checkpoint_config.json']={'sha256':file_hash(folder/'checkpoint_config.json')}
-    code=Path(__file__).parent.parent
-    for p in (code/'study2').glob('*.py'):_add_asset(folder,manifest,p,'code/study2/'+p.name)
+    code=Path(__file__).parent.parent;assets={}
+    for p in (code/'study2').glob('*.py'):assets['code/study2/'+p.name]=p
     for name in ['dashboard.py','requirements.lock.txt','pyproject.toml']:
-        if (code/name).is_file():_add_asset(folder,manifest,code/name,'code/'+name)
+        if (code/name).is_file():assets['code/'+name]=code/name
     if (code/'study2/assets/review_template.xlsx').is_file():
-        _add_asset(folder,manifest,code/'study2/assets/review_template.xlsx','code/study2/assets/review_template.xlsx')
-    for p in Path(cfg.get('mapping_dir',code/'mappings')).glob('*.py'):_add_asset(folder,manifest,p,'code/mappings/'+p.name)
+        assets['code/study2/assets/review_template.xlsx']=code/'study2/assets/review_template.xlsx'
+    for p in Path(cfg.get('mapping_dir',code/'mappings')).glob('*.py'):assets['code/mappings/'+p.name]=p
     for name in ['school_dictionary.xlsx','review_rule_compatibility.json']:
-        if (state/name).is_file():_add_asset(folder,manifest,state/name,name)
+        if (state/name).is_file():assets[name]=state/name
     from .adapters import source_root
     if cfg.get('project_root'):
         for entry in cfg.get('sources',[]):
             sources=list(source_root(cfg).glob(entry['pattern']))
             if not sources:raise PipelineError('Checkpoint source asset is missing')
             for p in sources:
-                _add_asset(folder,manifest,p,Path('source_project')/cfg.get('source_folder','1.1_raw_file')/p.name)
+                assets[str(Path('source_project')/cfg.get('source_folder','1.1_raw_file')/p.name)]=p
     if release and (Path(release['path'])/'checksums.json').is_file():
         release_path=Path(release['path'])
+        for p in release_path.rglob('*'):
+            # Recovery regenerates this checkpoint-relative retention marker.
+            # Including its old checkpoint path would invalidate every reuse.
+            if p.is_file() and not p.is_symlink() and p.name not in {'backup.sqlite','backup.sqlite.gz','backup.retention.json'}:
+                relative=Path('releases')/release['release_id']/p.relative_to(release_path)
+                assets[str(relative)]=p
+    return release,dict(sorted(assets.items()))
+
+
+def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes):
+    from .dyad_operator import TABLES
+    from .store import current
+    release=current(main)
+    if release and (Path(release['path'])/'checksums.json').is_file():
         from .artifacts import logical_hash
+        release_path=Path(release['path'])
         for name,h in json.loads((release_path/'checksums.json').read_text()).items():
             if logical_hash(release_path/name)!=h:raise PipelineError('Checkpoint source release failed verification')
-        for p in release_path.rglob('*'):
-            if p.is_file() and not p.is_symlink() and p.name not in {'backup.sqlite','backup.sqlite.gz'}:
-                relative=Path('releases')/release['release_id']/p.relative_to(release_path)
-                # Older plain audit exports remain logically byte-exact while
-                # their portable copy is compressed and self contained.
-                if p.suffix=='.jsonl':
-                    target=folder/relative.with_name(relative.name+'.gz');secure_directory(target.parent)
-                    h=_gzip(p,target);manifest['files'][str(target.relative_to(folder))]={
-                        'sha256':file_hash(target),'gzip':True,'uncompressed_sha256':h,'restore_path':str(relative)}
-                else:_add_asset(folder,manifest,p,relative)
+    atomic_json(folder/'checkpoint_config.json',cfg)
+    manifest['files']['checkpoint_config.json']={'sha256':file_hash(folder/'checkpoint_config.json')}
+    for name,p in assets.items():
+        relative=Path(name)
+        if relative.parts[0]=='releases' and p.suffix=='.jsonl':
+            target=folder/relative.with_name(relative.name+'.gz');secure_directory(target.parent)
+            h=_gzip(p,target);manifest['files'][str(target.relative_to(folder))]={
+                'sha256':file_hash(target),'gzip':True,'uncompressed_sha256':h,'restore_path':name}
+        else:
+            _add_asset(folder,manifest,p,relative)
+            h=manifest['files'][name]['sha256']
+        if h!=asset_hashes[name]:raise PipelineError('Checkpoint asset changed after freshness check')
     # Administrative overlay is rebuilt from the same frozen main snapshot.
     present=main.execute("SELECT 1 FROM sqlite_master WHERE name='dyad_registry'").fetchone()
     if present:
@@ -174,19 +188,14 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
             if not force and not records_v2(sources['study2.sqlite']):return {'legacy_storage':True}
             source_hashes={name:file_hash(state/name) for name in sources}
             from .common import digest
-            code_hashes={p.name:file_hash(p) for p in Path(__file__).parent.glob('*.py')}
-            from .adapters import source_root
-            assets={}
-            for p in Path(cfg.get('mapping_dir',Path(__file__).parent.parent/'mappings')).glob('*.py'):
-                assets['mapping/'+p.name]=file_hash(p)
-            if cfg.get('project_root'):
-                for entry in cfg.get('sources',[]):
-                    for p in source_root(cfg).glob(entry['pattern']):assets['source/'+p.name]=file_hash(p)
-            for name in ['review_rule_compatibility.json']:
-                if (state/name).is_file():assets[name]=file_hash(state/name)
-            settings={'config':config_override or cfg,'code':code_hashes,
-                      'assets':assets,
-                      'dictionary':file_hash(state/'school_dictionary.xlsx') if (state/'school_dictionary.xlsx').exists() else None}
+            from .store import current
+            release=current(sources['study2.sqlite'])
+            if release and (Path(release['path'])/'checksums.json').is_file():
+                from .publication_baseline import ensure_baseline
+                ensure_baseline(release['path'],release['release_id'])
+            release,assets=_asset_inventory(cfg,sources['study2.sqlite'])
+            asset_hashes={name:file_hash(p) for name,p in assets.items()}
+            settings={'config':config_override or cfg,'assets':asset_hashes}
             input_revision=digest(settings)
             old=json.loads(pointer.read_text()) if pointer.exists() else None
             previous=None;old_manifest=None
@@ -195,18 +204,14 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                 if any((previous/_safe_relative(name)).is_symlink() or not (previous/_safe_relative(name)).is_file() or file_hash(previous/_safe_relative(name))!=entry['sha256']
                        for name,entry in old_manifest['files'].items()):old_manifest=None
                 if old_manifest and old_manifest['source_hashes']==source_hashes and old_manifest.get('input_revision')==input_revision:
-                    _prune_full_copies(cfg,previous)
+                    _finish_retention(cfg,previous)
                     (state/'CHECKPOINT_PENDING.json').unlink(missing_ok=True)
                     return {'unchanged':True,'checkpoint_id':old_manifest['checkpoint_id'],'path':str(previous)}
             cid='CHECKPOINT_'+uuid.uuid4().hex;temporary=root/('.building_'+cid);secure_directory(temporary)
             manifest={'format_version':1,'checkpoint_id':cid,'created_at':utcnow(),'reason':reason,
-                      'source_hashes':source_hashes,'input_revision':input_revision,'files':{}}
+                      'source_hashes':source_hashes,'input_revision':input_revision,'input_assets':asset_hashes,
+                      'release_id':release['release_id'] if release else None,'files':{}}
             try:
-                from .store import current
-                release=current(sources['study2.sqlite'])
-                if release and (Path(release['path'])/'checksums.json').is_file():
-                    from .publication_baseline import ensure_baseline
-                    ensure_baseline(release['path'],release['release_id'])
                 for name,source in sources.items():
                     previous_entry=old_manifest['files'].get(name+'.gz') if old_manifest else None
                     if previous_entry and old_manifest['source_hashes'].get(name)==source_hashes[name]:
@@ -220,7 +225,10 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                     archive=temporary/(name+'.gz');h=_gzip(plain,archive);plain.unlink()
                     manifest['files'][archive.name]={'sha256':file_hash(archive),'gzip':True,
                                 'uncompressed_sha256':h,'restore_path':name}
-                _capture_assets(temporary,manifest,cfg,sources['study2.sqlite'])
+                _capture_assets(temporary,manifest,cfg,sources['study2.sqlite'],assets,asset_hashes)
+                _,current_assets=_asset_inventory(cfg,sources['study2.sqlite'])
+                if {name:file_hash(p) for name,p in current_assets.items()}!=asset_hashes:
+                    raise PipelineError('Checkpoint asset inventory changed during capture')
                 if config_override:
                     atomic_json(temporary/'checkpoint_config.json',config_override)
                     manifest['files']['checkpoint_config.json']['sha256']=file_hash(temporary/'checkpoint_config.json')
@@ -230,17 +238,32 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                     restore_checkpoint(temporary,Path(temp)/'restored',verify_only=True)
                 final=root/cid;os.replace(temporary,final)
                 atomic_json(pointer,{'checkpoint_id':cid,'path':str(final),'manifest_sha256':file_hash(final/'manifest.json')})
-                # Prune only managed complete checkpoints after the new one is
-                # independently recovered. Never follow paths from old hints.
-                for p in root.glob('CHECKPOINT_*'):
-                    if p!=final and p.is_dir() and not p.is_symlink():shutil.rmtree(p)
-                _prune_full_copies(cfg,final)
+                _finish_retention(cfg,final)
                 (state/'CHECKPOINT_PENDING.json').unlink(missing_ok=True)
                 return {'checkpoint_id':cid,'path':str(final),'verified_recovery':True}
             except BaseException:
                 shutil.rmtree(temporary,ignore_errors=True);raise
         finally:
             for db in connections:db.close()
+
+
+def _finish_retention(cfg,final):
+    """Promote the ledger before pruning; retry unfinished cleanup on reuse."""
+    state=Path(cfg['state_dir']);final=Path(final)
+    tracking=final/'recovered_tracking/manifest.json'
+    pointer=state/'DYAD_LEDGER.json'
+    if cfg.get('checkpoint_policy',{}).get('latest_complete_only') and tracking.is_file():
+        saved=json.loads(tracking.read_text())
+        ledger={'bundle':str(tracking.parent),'hash':saved['tracking_hash']}
+        if not pointer.is_file() or json.loads(pointer.read_text())!=ledger:atomic_json(pointer,ledger)
+    _prune_full_copies(cfg,final)
+    # Legacy bundle pointers retain their original contract when the policy
+    # is disabled. Keep any checkpoint they still reference across a change
+    # of policy; never delete a ledger's recovery directory.
+    bundle=Path(json.loads(pointer.read_text())['bundle']).resolve() if pointer.is_file() else None
+    for p in (state/'checkpoints').glob('CHECKPOINT_*'):
+        if p!=final and p.is_dir() and not p.is_symlink() and not (bundle and bundle.is_relative_to(p.resolve())):
+            shutil.rmtree(p)
 
 
 def _prune_full_copies(cfg,final):
@@ -276,8 +299,6 @@ def _prune_full_copies(cfg,final):
                 data['recovery_checkpoint']=str(final);atomic_json(p,data)
         tracking=final/'recovered_tracking/manifest.json'
         if tracking.is_file():
-            saved=json.loads(tracking.read_text())
-            atomic_json(state/'DYAD_LEDGER.json',{'bundle':str(tracking.parent),'hash':saved['tracking_hash']})
             for p in (state/'dyad_backups').glob('*/tracking.json'):
                 if not p.is_file() or p.is_symlink():continue
                 atomic_json(p.with_name('tracking.retention.json'),{'full_restore_available':False,

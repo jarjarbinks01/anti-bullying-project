@@ -100,3 +100,38 @@ def test_interrupted_migration_resumes_and_verifies_all_records(tmp_path):
     assert result['after']['rows']==3
     assert list(read_records(db,'run'))==[json.loads(dumps(r)) for r in rows]
     db.close()
+
+
+@pytest.mark.parametrize('phase',['renamed','schema_installed','references_copied','legacy_dropped'])
+def test_resume_compaction_from_committed_legacy_intermediate_states(tmp_path,phase):
+    from study2 import compact_storage
+    from study2.storage import RECORD_SCHEMA
+    path=tmp_path/'study2.sqlite';db=sqlite3.connect(path);db.row_factory=sqlite3.Row
+    db.executescript(SCHEMA)
+    db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?)',('run','fp','now','published','{}',None,None))
+    rows=[source(rec('synthetic-'+str(i))) for i in range(3)]
+    ingest(db,'run',rows)
+    for row in rows:db.execute('INSERT INTO normalized_records VALUES(?,?,?)',('run',row['submission_id'],dumps(row)))
+    db.execute('ALTER TABLE normalized_records RENAME TO normalized_records_legacy');db.commit()
+    db.executescript(RECORD_SCHEMA)
+    store_record(db,'run',rows[0]['submission_id'],rows[0]);db.commit()
+    original=[tuple(r) for r in db.execute('SELECT * FROM submission_versions ORDER BY version_id')]
+    db.execute('DROP VIEW normalized_records')
+    db.execute('ALTER TABLE normalized_record_refs RENAME TO normalized_record_refs_legacy');db.commit()
+    if phase!='renamed':
+        db.executescript(compact_storage.SCHEMA)
+    if phase in {'references_copied','legacy_dropped'}:
+        for row in db.execute('SELECT * FROM normalized_record_refs_legacy'):compact_storage.store(db,tuple(row))
+        db.commit()
+    if phase=='legacy_dropped':db.execute('DROP TABLE normalized_record_refs_legacy');db.commit()
+    db.close()
+    # Reopen the actual persisted layout, without relying on in-memory phase state.
+    db=sqlite3.connect(path);db.row_factory=sqlite3.Row
+    result=migrate_records(db)
+    assert result['before']==result['after'] and result['after']['rows']==3
+    assert list(read_records(db,'run'))==[json.loads(dumps(r)) for r in rows]
+    assert [tuple(r) for r in db.execute('SELECT * FROM submission_versions ORDER BY version_id')]==original
+    assert db.execute("SELECT version FROM storage_schema WHERE component='record_view'").fetchone()[0]==5
+    assert not db.execute('PRAGMA foreign_key_check').fetchall()
+    assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='normalized_record_refs_legacy'").fetchone()
+    db.close()

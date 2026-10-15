@@ -150,3 +150,107 @@ def test_missing_source_cannot_replace_a_complete_checkpoint(project):
     source=Path(cfg['project_root'])/'1.1_raw_file/synthetic.csv';source.unlink()
     with pytest.raises(PipelineError,match='source asset is missing'):save_checkpoint(cfg)
     assert latest(cfg)==old and Path(old['path']).exists()
+
+
+@pytest.mark.parametrize('asset',[
+    'dashboard.py','requirements.lock.txt','pyproject.toml','study2/assets/review_template.xlsx'])
+@pytest.mark.parametrize('remove',[False,True])
+def test_every_captured_application_asset_invalidates_checkpoint(project,tmp_path,monkeypatch,asset,remove):
+    import shutil
+    import study2.checkpoints as checkpoints
+    code=tmp_path/'application';(code/'study2/assets').mkdir(parents=True)
+    (code/'study2/__init__.py').write_text('# synthetic application\n')
+    original=Path(checkpoints.__file__).parent.parent
+    for name in ['dashboard.py','requirements.lock.txt','pyproject.toml','study2/assets/review_template.xlsx']:
+        shutil.copy2(original/name,code/name)
+    monkeypatch.setattr(checkpoints,'__file__',str(code/'study2/checkpoints.py'))
+    cfg,_,_,_=project;execute(project);before=latest(cfg)
+    target=code/asset
+    if remove:target.unlink()
+    else:target.write_bytes(target.read_bytes()+b'\n# synthetic asset revision\n')
+    result=save_checkpoint(cfg)
+    assert result.get('verified_recovery') and latest(cfg)!=before
+    restored=tmp_path/'revised-application';restore_checkpoint(result['path'],restored)
+    saved=restored/'code'/asset
+    if remove:assert not saved.exists()
+    else:assert saved.read_bytes()==target.read_bytes()
+    assert save_checkpoint(cfg)['unchanged']
+
+
+@pytest.mark.parametrize('failure',['ledger','prune'])
+def test_checkpoint_replacement_interruption_keeps_administrative_ledger_usable(project,monkeypatch,failure):
+    import study2.checkpoints as checkpoints
+    from study2.dyad_operator import recovery_check
+    cfg,_,_,_=project;cfg['checkpoint_policy']={'latest_complete_only':True};execute(project)
+    state=Path(cfg['state_dir']);old=latest(cfg);ledger=state/'DYAD_LEDGER.json'
+    db=connect(state)
+    with db:
+        dyad_id=db.execute('SELECT dyad_id FROM dyad_registry LIMIT 1').fetchone()[0]
+        db.execute('INSERT INTO dyad_events VALUES(?,?,?,?,?,?,?)',
+                   ('synthetic-new-event','now','synthetic',dyad_id,'synthetic','synthetic event','{}'))
+    db.close()
+    atomic=checkpoints.atomic_json;rmtree=checkpoints.shutil.rmtree
+    def fail_ledger(path,data):
+        if Path(path)==ledger:raise OSError('synthetic ledger update interruption')
+        return atomic(path,data)
+    def fail_prune(path,*args,**kwargs):
+        if Path(path)==Path(old['path']):raise OSError('synthetic checkpoint pruning interruption')
+        return rmtree(path,*args,**kwargs)
+    with monkeypatch.context() as m:
+        if failure=='ledger':m.setattr(checkpoints,'atomic_json',fail_ledger)
+        else:m.setattr(checkpoints.shutil,'rmtree',fail_prune)
+        with pytest.raises(OSError,match='synthetic'):save_checkpoint(cfg)
+    replacement=latest(cfg);assert replacement!=old
+    assert Path(old['path']).exists()
+    expected=old if failure=='ledger' else replacement
+    assert json.loads(ledger.read_text())['bundle']==str(Path(expected['path'])/'recovered_tracking')
+    live=connect(state,readonly=True);recovery_check(live,cfg);live.close()
+    assert save_checkpoint(cfg)['unchanged']
+    assert not Path(old['path']).exists()
+    assert len(list((state/'checkpoints').glob('CHECKPOINT_*')))==1
+    assert json.loads(ledger.read_text())['bundle']==str(Path(replacement['path'])/'recovered_tracking')
+    live=connect(state,readonly=True);recovery_check(live,cfg);live.close()
+    destination=state.parent/'interrupted-checkpoint-recovery'
+    restore_checkpoint(replacement['path'],destination)
+    with sqlite3.connect(destination/'study2.sqlite') as db:
+        assert db.execute('SELECT count(*) FROM dyad_events WHERE event_id=?',('synthetic-new-event',)).fetchone()[0]==1
+
+
+def test_added_release_recovery_asset_replaces_checkpoint(project,tmp_path):
+    cfg,_,_,_=project;result=execute(project);before=latest(cfg)
+    asset=Path(cfg['release_dir'])/result['release_id']/'reproduce/synthetic-notes.txt'
+    asset.write_text('synthetic recovery instructions\n')
+    replacement=save_checkpoint(cfg)
+    assert replacement.get('verified_recovery') and latest(cfg)!=before
+    destination=tmp_path/'release-asset-recovery';restore_checkpoint(replacement['path'],destination)
+    assert (destination/'releases'/result['release_id']/'reproduce/synthetic-notes.txt').read_bytes()==asset.read_bytes()
+    assert save_checkpoint(cfg)['unchanged']
+
+
+def test_asset_change_during_capture_keeps_previous_checkpoint(project,monkeypatch):
+    import study2.checkpoints as checkpoints
+    cfg,_,_,_=project;mapping=Path(cfg['mapping_dir'])/'synthetic.py'
+    mapping.write_text('# synthetic first revision\n');execute(project);before=latest(cfg)
+    mapping.write_text('# synthetic second revision\n')
+    capture=checkpoints._capture_assets
+    def change_after_capture(*args,**kwargs):
+        capture(*args,**kwargs)
+        mapping.write_text('# synthetic third revision\n')
+    monkeypatch.setattr(checkpoints,'_capture_assets',change_after_capture)
+    with pytest.raises(PipelineError,match='asset inventory changed'):save_checkpoint(cfg)
+    assert latest(cfg)==before and Path(before['path']).is_dir()
+    assert not list((Path(cfg['state_dir'])/'checkpoints').glob('.building_*'))
+
+
+def test_disabling_latest_only_policy_keeps_its_referenced_ledger_checkpoint(project):
+    from study2.dyad_operator import recovery_check
+    cfg,_,_,_=project;cfg['checkpoint_policy']={'latest_complete_only':True};execute(project)
+    state=Path(cfg['state_dir']);old=latest(cfg);ledger=(state/'DYAD_LEDGER.json').read_bytes()
+    cfg['checkpoint_policy']={'latest_complete_only':False}
+    assert save_checkpoint(cfg)['verified_recovery']
+    assert Path(old['path']).is_dir() and (state/'DYAD_LEDGER.json').read_bytes()==ledger
+    live=connect(state,readonly=True);recovery_check(live,cfg);live.close()
+    cfg['checkpoint_policy']={'latest_complete_only':True}
+    assert save_checkpoint(cfg)['verified_recovery']
+    assert len(list((state/'checkpoints').glob('CHECKPOINT_*')))==1
+    live=connect(state,readonly=True);recovery_check(live,cfg);live.close()

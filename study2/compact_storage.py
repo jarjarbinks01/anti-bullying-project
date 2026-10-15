@@ -46,22 +46,26 @@ def register(db):
 
 
 def migrate(db):
-    from .storage import RECORD_SCHEMA,register_record_writer
     from .run_storage import table_digest
     register(db)
     legacy='normalized_record_refs_legacy'
     if enabled(db) and 'version_id' in [r[1] for r in db.execute('PRAGMA table_info(processed_run_refs)')]:
         # Freeze the old adapter before moving the source version into values.
-        db.execute('CREATE TABLE '+legacy+' AS SELECT * FROM normalized_record_refs');db.commit()
-        db.execute('DROP VIEW normalized_records');db.execute('DROP VIEW normalized_record_refs')
-        db.execute('DROP TABLE processed_run_refs');db.execute('DROP TABLE processed_record_values');db.commit()
-        db.executescript(SCHEMA)
+        if not db.execute('SELECT 1 FROM sqlite_master WHERE name=?',(legacy,)).fetchone():
+            db.execute('CREATE TABLE '+legacy+' AS SELECT * FROM normalized_record_refs');db.commit()
+        db.executescript('BEGIN IMMEDIATE; DROP VIEW IF EXISTS normalized_records; DROP VIEW normalized_record_refs; '
+                         'DROP TABLE processed_run_refs; DROP TABLE processed_record_values; '+SCHEMA+' COMMIT;')
     kind=db.execute("SELECT type FROM sqlite_master WHERE name='normalized_record_refs'").fetchone()
     if kind and kind[0]=='table':
-        db.execute('DROP VIEW IF EXISTS normalized_records')
-        db.execute('ALTER TABLE normalized_record_refs RENAME TO '+legacy);db.commit()
-        db.executescript(SCHEMA)
-    if not db.execute('SELECT 1 FROM sqlite_master WHERE name=?',(legacy,)).fetchone():return {'already_compact':True}
+        db.executescript('BEGIN IMMEDIATE; DROP VIEW IF EXISTS normalized_records; '
+                         'ALTER TABLE normalized_record_refs RENAME TO '+legacy+'; '+SCHEMA+' COMMIT;')
+    saved=db.execute('SELECT 1 FROM sqlite_master WHERE name=?',(legacy,)).fetchone()
+    # An older migration may have committed its rename or copied references
+    # without installing the adapter. Recover from the persisted layout.
+    if saved:db.executescript(SCHEMA)
+    if not saved:
+        if enabled(db):_finish(db)
+        return {'already_compact':True}
     columns=[r[1] for r in db.execute('PRAGMA table_info('+legacy+')')]
     before=table_digest(db,legacy,columns);n=0
     for row in db.execute('SELECT o.* FROM '+legacy+' o WHERE NOT EXISTS(SELECT 1 FROM processed_run_refs r WHERE r.run_id=o.run_id AND r.submission_id=o.submission_id)'):
@@ -69,10 +73,14 @@ def migrate(db):
         if n%5000==0:db.commit()
     db.commit();after=table_digest(db,'normalized_record_refs',columns)
     if before!=after:raise PipelineError('Compact run references differ; original references retained')
-    db.execute('DROP TABLE '+legacy);db.commit()
+    _finish(db,legacy)
+    return {'before':before,'after':after}
+
+
+def _finish(db,legacy=None):
+    from .storage import RECORD_SCHEMA,register_record_writer
     # Reuse the exact legacy reconstruction and writer contract.
     view=RECORD_SCHEMA[RECORD_SCHEMA.index('CREATE VIEW IF NOT EXISTS normalized_records'):]
-    db.executescript(view)
-    db.execute("INSERT OR REPLACE INTO storage_schema VALUES('record_view',5)");db.commit()
+    discard='DROP TABLE '+legacy+';' if legacy else ''
+    db.executescript('BEGIN IMMEDIATE; '+view+" INSERT OR REPLACE INTO storage_schema VALUES('record_view',5); "+discard+' COMMIT;')
     register_record_writer(db)
-    return {'before':before,'after':after}

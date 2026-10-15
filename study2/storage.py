@@ -86,13 +86,18 @@ def register_record_writer(db):
 
 def install_records(db):
     register_record_writer(db)
+    from .compact_storage import migrate
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='normalized_record_refs_legacy' AND type='table'").fetchone():
+        migrate(db)
+        return
     marker=db.execute("SELECT 1 FROM sqlite_master WHERE name='storage_schema' AND type='table'").fetchone()
     current=db.execute("SELECT version FROM storage_schema WHERE component='record_view'").fetchone() if marker else None
-    if current and current[0] in {3,4,5}:return
+    if current and current[0] in {3,4,5}:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='normalized_records' AND type='view'").fetchone():migrate(db)
+        return
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='normalized_records' AND type='view'").fetchone():
         db.execute('DROP VIEW normalized_records')
     db.executescript(RECORD_SCHEMA)
-    from .compact_storage import migrate
     migrate(db)
 
 
