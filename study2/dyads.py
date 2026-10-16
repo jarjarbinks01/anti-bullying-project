@@ -64,7 +64,17 @@ def migrate(db):
         prior = [r[0] for r in db.execute('SELECT version FROM dyad_schema')]
         if prior and max(prior) != SCHEMA_VERSION:
             raise PipelineError('Unsupported permanent registration schema version')
-    db.executescript(SCHEMA)
+    kind=db.execute("SELECT type FROM sqlite_master WHERE name='dyad_memberships'").fetchone()
+    shared=(kind and kind[0]=='view') or (not kind and db.execute("SELECT 1 FROM sqlite_master WHERE name='release_candidate_refs'").fetchone())
+    schema=SCHEMA
+    if shared:
+        start=schema.index('CREATE TABLE IF NOT EXISTS dyad_memberships(')
+        end=schema.index('CREATE TABLE IF NOT EXISTS dyad_events(')
+        schema=schema[:start]+schema[end:]
+    db.executescript(schema)
+    if shared:
+        from .run_storage import install_memberships
+        install_memberships(db)
     versions = [r[0] for r in db.execute('SELECT version FROM dyad_schema')]
     if versions and max(versions) != SCHEMA_VERSION:
         raise PipelineError('Unsupported permanent registration schema version')
@@ -93,8 +103,8 @@ def related_ids(db, did):
 
 
 def scientific_records(db, run_id):
-    return [json.loads(r[0]) for r in db.execute(
-        "SELECT json_remove(payload_json,'$.raw') FROM normalized_records WHERE run_id=? ORDER BY submission_id", (run_id,))]
+    from .storage import read_records
+    return list(read_records(db, run_id, include_raw=False))
 
 
 def scientific_cases(db, release_id):
@@ -129,9 +139,17 @@ def group_signature(rows, cases, cfg):
                    'identity_code': cfg.get('_dyad_identity_code')})
 
 
-def identity_code():
+def identity_code(cfg=None):
     from .common import file_hash
-    return {n: file_hash(Path(__file__).parent / n) for n in ('matching.py', 'respondents.py', 'review_core.py')}
+    hashes={n:file_hash(Path(__file__).parent/n) for n in ('matching.py','respondents.py','review_core.py')}
+    if cfg and cfg.get('state_dir'):
+        compatibility=Path(cfg['state_dir'])/'review_rule_compatibility.json'
+        if compatibility.is_file():
+            proof=json.loads(compatibility.read_text())
+            complete={**hashes,'review_hints.py':file_hash(Path(__file__).parent/'review_hints.py')}
+            if proof.get('format_version')==1 and proof.get('verified') is True and proof.get('current_code')==complete:
+                hashes={n:proof['original_code'][n] for n in hashes}
+    return hashes
 
 
 def _tracking(child, rows, cells, cases, cfg):
@@ -181,7 +199,7 @@ def _tracking(child, rows, cells, cases, cfg):
 
 def plan(db, run_id, records, cases, cfg):
     """No mutations or random allocation. Preview IDs for new rows stay blank."""
-    cfg = {**cfg, '_dyad_identity_code': identity_code()}
+    cfg = {**cfg, '_dyad_identity_code': identity_code(cfg)}
     by_id = {r['submission_id']: r for r in records}
     groups = defaultdict(list)
     cells = {}

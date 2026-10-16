@@ -1,5 +1,6 @@
 """Synthetic acceptance tests for permanent IDs and administrative isolation."""
 import copy
+import errno
 import json
 import sqlite3
 from pathlib import Path
@@ -13,6 +14,40 @@ from study2.common import PipelineError, dumps
 from study2.store import connect, current
 from test_identity_and_time import rec
 from test_pipeline_integration import execute, project
+
+
+@pytest.mark.parametrize('link_supported', [True, False])
+def test_tracking_review_snapshot_survives_workspace_changes_and_backup_removal(tmp_path, link_supported):
+    from study2 import review_core
+
+    cfg = {'state_dir': str(tmp_path)}
+    db = connect(tmp_path)
+    work = review_core.workspace(cfg)
+    with work:
+        work.execute('INSERT INTO events(at,kind,target,payload) VALUES(?,?,?,?)',
+                     ('now', 'synthetic', 'before', '{}'))
+    work.close()
+    if link_supported:
+        folder = Path(operator.backup_tracking(db, cfg, 'synthetic_storage'))
+    else:
+        with patch('study2.dyad_operator.os.link', side_effect=OSError(errno.EXDEV, 'synthetic cross-device link')):
+            folder = Path(operator.backup_tracking(db, cfg, 'synthetic_storage'))
+    db.close()
+    snapshot = folder / 'review.sqlite'
+    standalone = next((tmp_path / 'review_backups').glob('*.sqlite'))
+    assert snapshot.samefile(standalone) is link_supported
+    assert not snapshot.samefile(tmp_path / 'review.sqlite')
+    # A new live event and removal of the standalone path must leave a
+    # verifiable recovery bundle containing the original review history.
+    work = review_core.workspace(cfg)
+    with work:
+        work.execute('INSERT INTO events(at,kind,target,payload) VALUES(?,?,?,?)',
+                     ('later', 'synthetic', 'after', '{}'))
+    work.close()
+    standalone.unlink()
+    operator.verify_bundle(folder)
+    with sqlite3.connect(snapshot.as_uri() + '?mode=ro', uri=True) as saved:
+        assert saved.execute('SELECT target FROM events').fetchall() == [('before',)]
 
 
 def published(cfg):

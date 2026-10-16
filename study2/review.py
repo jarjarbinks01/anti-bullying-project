@@ -28,9 +28,8 @@ def release_records(db) -> tuple[dict, dict]:
     release = current(db)
     if not release:
         raise PipelineError("No published release")
-    records = {r["submission_id"]: r for r in db.execute(
-        "SELECT n.submission_id,n.payload_json FROM normalized_records n WHERE run_id=?", (release["run_id"],))}
-    return release, {k: json.loads(v["payload_json"]) for k, v in records.items()}
+    from .storage import read_records
+    return release, {r['submission_id']:r for r in read_records(db,release['run_id'])}
 
 
 def export_review(db, cfg: dict, path: Path, limit=500):

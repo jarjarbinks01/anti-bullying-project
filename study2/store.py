@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import sqlite3
+import tempfile
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 
-from .common import PipelineError, dumps, secure_directory, utcnow
+from .common import PipelineError, dumps, file_hash, secure_directory, utcnow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS submissions(
@@ -57,6 +61,8 @@ CREATE TABLE IF NOT EXISTS paper_registry(
 
 
 def connect(state: Path, readonly: bool = False) -> sqlite3.Connection:
+    from .maintenance import recover_activation
+    recover_activation(state)
     path = state / "study2.sqlite"
     if readonly:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -64,7 +70,20 @@ def connect(state: Path, readonly: bool = False) -> sqlite3.Connection:
         secure_directory(state)
         db = sqlite3.connect(path, timeout=30)
         path.chmod(0o600)
-        db.executescript(SCHEMA)
+        from .storage import install_records, register_record_writer
+        record_type = db.execute("SELECT type FROM sqlite_master WHERE name='normalized_records'").fetchone()
+        if record_type and record_type[0] == 'table':
+            db.executescript(SCHEMA)
+        else:
+            legacy = "CREATE TABLE IF NOT EXISTS normalized_records(\n run_id TEXT REFERENCES runs, submission_id TEXT REFERENCES submissions,\n payload_json TEXT NOT NULL, PRIMARY KEY(run_id,submission_id));"
+            candidates="CREATE TABLE IF NOT EXISTS release_candidates(\n release_id TEXT REFERENCES releases, case_id TEXT, payload_json TEXT NOT NULL,\n PRIMARY KEY(release_id,case_id));"
+            db.executescript(SCHEMA.replace(legacy,'').replace(candidates,''))
+            install_records(db)
+            from .run_storage import install_candidates
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='release_candidates' AND type='table'").fetchone():install_candidates(db)
+        register_record_writer(db)
+        from .run_storage import register
+        register(db)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     return db
@@ -72,6 +91,8 @@ def connect(state: Path, readonly: bool = False) -> sqlite3.Connection:
 
 @contextmanager
 def writer_lock(state: Path):
+    from .maintenance import recover_activation
+    recover_activation(state)
     import fcntl
     secure_directory(state)
     with (state / "writer.lock").open("a") as lock:
@@ -87,7 +108,14 @@ def writer_lock(state: Path):
 
 def current(db: sqlite3.Connection) -> dict | None:
     row = db.execute("SELECT r.* FROM releases r JOIN publication p ON r.release_id=p.release_id WHERE p.singleton=1").fetchone()
-    return dict(row) if row else None
+    result=dict(row) if row else None
+    if result:
+        state=Path(db.execute('PRAGMA database_list').fetchone()[2]).parent
+        mapping=state/'release_locations.json'
+        if mapping.exists():
+            locations=json.loads(mapping.read_text())
+            result['path']=locations.get(result['release_id'],result['path'])
+    return result
 
 
 def ingest(db, run_id: str, records: list[dict]) -> None:
@@ -104,6 +132,38 @@ def ingest(db, run_id: str, records: list[dict]) -> None:
         db.execute("INSERT OR IGNORE INTO submission_versions VALUES(?,?,?,?,?,?,?)", (
             record["version_id"], sid, record["raw_hash"], dumps(record["raw"]), dumps(record["answer"]), dumps(record["location"]), utcnow()))
         db.execute("INSERT INTO run_records VALUES(?,?,?)", (run_id, sid, record["version_id"]))
+
+
+@contextmanager
+def backup_path(path: Path, expected_hash: str | None = None):
+    """Read a plain or gzip backup through a private temporary SQLite file."""
+    path = Path(path)
+    logical_name = path.name.removesuffix('.gz')
+    checksum_file = path.parent / 'backup.sha256.json'
+    if expected_hash is None and checksum_file.exists():
+        expected_hash = json.loads(checksum_file.read_text()).get(logical_name)
+    if path.suffix != '.gz' and path.is_file():
+        if expected_hash and file_hash(path) != expected_hash:
+            raise PipelineError('Release backup checksum mismatch')
+        yield path
+        return
+    archive = path if path.suffix == '.gz' else path.with_name(path.name + '.gz')
+    if not archive.is_file():
+        raise PipelineError('Full recovery backup is unavailable; it may have been removed by retention')
+    with tempfile.TemporaryDirectory(prefix='study2-backup-') as folder:
+        restored = Path(folder) / 'backup.sqlite'
+        h = hashlib.sha256()
+        try:
+            with gzip.open(archive, 'rb') as origin, restored.open('xb') as target:
+                restored.chmod(0o600)
+                for chunk in iter(lambda: origin.read(1024 * 1024), b''):
+                    h.update(chunk)
+                    target.write(chunk)
+        except (OSError, EOFError, zlib.error) as error:
+            raise PipelineError('Compressed backup could not be read or verified') from error
+        if expected_hash and h.hexdigest() != expected_hash:
+            raise PipelineError('Release backup checksum mismatch')
+        yield restored
 
 
 def backup(db, path: Path) -> None:

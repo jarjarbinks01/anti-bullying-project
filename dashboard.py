@@ -86,10 +86,8 @@ def sample_frames(release_id, path, state_dir, run_id):
     parents = pd.read_parquet(parent_path) if parent_path.exists() else None
     db = connect(Path(state_dir), readonly=True)
     try:
-        metadata = pd.read_sql_query(
-            "SELECT submission_id, json_extract(payload_json,'$.observed_at') AS observed_at, "
-            "json_extract(payload_json,'$.claimed_wave') AS claimed_wave "
-            "FROM normalized_records WHERE run_id=?", db, params=(run_id,))
+        from study2.storage import record_metadata
+        metadata = pd.DataFrame(record_metadata(db,run_id),columns=['submission_id','observed_at','claimed_wave'])
     finally:
         db.close()
     def attach(rows):
@@ -105,12 +103,8 @@ sample_frame, parent_frame = sample_frames(release["release_id"], str(release_pa
 def imported_source_counts(release_id, state_dir, run_id):
     db = connect(Path(state_dir), readonly=True)
     try:
-        counts = pd.read_sql_query(
-            "SELECT COALESCE(json_extract(payload_json,'$.source_label'), "
-            "json_extract(payload_json,'$.answer.Survey')) AS source_label, "
-            "json_extract(payload_json,'$.role') AS role, "
-            "json_extract(payload_json,'$.claimed_wave') AS wave, COUNT(*) AS submissions "
-            "FROM normalized_records WHERE run_id=? GROUP BY 1,2,3", db, params=(run_id,))
+        from study2.storage import imported_source_counts as stored_source_counts
+        counts = pd.DataFrame(stored_source_counts(db,run_id),columns=['source_label','role','wave','submissions'])
     finally:
         db.close()
     counts["source_type"] = counts["source_label"].map(lambda value: source_category(str(value)) if pd.notna(value) and value else "unknown")

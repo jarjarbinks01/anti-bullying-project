@@ -63,3 +63,16 @@ parent 的 identity_members 指向「回應所指孩子」。BD 另要求成人�
 原始 `submission_id`、來源版本及審核規則不受行政 ID 影響。研究回退保留較新的行政歷史；追蹤 bundle 另保存發布後新增的登記、邀請、裁定及完整審核工作區。操作及還原方法見 [永久親子追蹤指南](DYAD_TRACKING_OPERATIONS.md)。
 
 主庫新增 `review_applications`，固定批次 ID 與正式指令、核實標記在同一交易提交，避免兩個資料庫之間中斷導致重複套用。審核者答案永遠先保存在工作區；發布資料不讀未批准答案。核實標記的 `pre_review` 保存修正前判斷，工作區另保留全部審核／裁定歷史。
+
+
+## 共享值及證據
+
+新版 main DB 以 `record_values` 保存不可修改的處理值，`normalized_record_refs` 保留每個 run、提交和來源版本的對應。原始及標準化來源仍在 `submission_versions`；相同值可共用儲存空間，不合併參加者。`normalized_records` 相容 view 和讀取 adapter 可重建完整舊格式，常用日期及來源欄位另有索引。
+
+儲存 view 版本 5 的實體對應在 `processed_run_refs`；相同處理值的來源版本、原始／答值指紋、日期、來源及狀態投影共用 `processed_record_values`。`normalized_record_refs` 是保留原欄位的相容 view。`run_payload_values` 共用完全相同的候選及家庭 JSON；`release_candidate_refs`、`dyad_membership_refs` 保留每個 run 的原有身份、狀態及對應。`release_candidates`、`dyad_memberships` 的原有讀寫介面、家庭唯一性限制及歷史資料仍保留。
+
+新版 review DB 分開 `review_packages`、`review_tasks`、`review_task_values` 和 `review_components`。工作包固定保留原 task value 的有序對應，後續 task 狀態或值更改不會重寫原包。完整連通證據及原有簽章保留；`packages` 和 `tasks` 相容 view 支援既有讀取及工作簿。
+
+儲存格式與審核規則版本分開。機械重構的相容對應須有原／新程式指紋和完整證據比較，不會自動接受未知的程式或規則變更。科學算法、人工裁定和身份配對規則不因儲存共用而改變。
+
+候選匯出以個案 ID 固定排序；原有工作表中的樣本次序保持。相同 Parquet、工作簿、來源及程式檔案共用不可修改的檔案物件。歷史輸出的 JSONL 壓縮仍可逐位元組驗證原有邏輯內容。最新完整 checkpoint 包含主庫、審核庫和 gzip 追蹤資料，還原不依賴原有物件快取。
