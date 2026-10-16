@@ -5,7 +5,6 @@ is expanded into explicit, versioned pair decisions only after Jarvis approval.
 """
 from collections import defaultdict
 from itertools import combinations
-
 from pathlib import Path
 
 from .common import PipelineError, contacts, digest, file_hash
@@ -29,7 +28,51 @@ def direct_components(ids, passed_pairs):
     return sorted(components.values())
 
 
+def _group_pair_evidence(ids, prepared, router, policy):
+    """Record all direct evidence and restrictions, including existing members."""
+    passed, gaps, conflicts, restrictions = [], [], [], []
+    for left, right in combinations(ids, 2):
+        if hard_conflict(prepared[left], prepared[right]):
+            conflicts.append([left, right])
+        identities = tuple(sorted((router._find('child', left), router._find('child', right))))
+        if identities in router.forbidden['child']:
+            restrictions.append([left, right])
+        rule = automatic_rule(prepared[left], prepared[right], policy)
+        evidence = {'a': left, 'b': right, 'rule': rule}
+        (passed if rule else gaps).append(evidence)
+    return passed, gaps, conflicts, restrictions
+
+
+def _has_incomplete_members(ids, records, prepared):
+    from .review_dispatch import ELIGIBLE, _birthday
+
+    return any(
+        not _birthday(records[sid])
+        or str(records[sid].get('gender')) not in {'0', '1'}
+        or not records[sid].get('school')
+        or not prepared[sid]['contacts']
+        or records[sid].get('status') not in ELIGIBLE
+        for sid in ids
+    )
+
+
+def _group_issue(conflicts, restrictions, incomplete, directly_connected):
+    """Give contradictions priority over missing links when describing a group."""
+    if conflicts:
+        return 'identity_conflict'
+    if restrictions:
+        return 'manual_nonmatch'
+    if incomplete:
+        return 'incomplete_members'
+    return 'contact_bridge' if directly_connected else 'contact_gap'
+
+
 def build_groups(records, cases, decisions=(), policy=None):
+    """Build scientific comparison scopes, independently of worker dispatch.
+
+    Existing identities remain atomic. Pending comparisons add scope, not
+    confirmed links; dispatch may later park a scope without changing it.
+    """
     from .review_dispatch import Router
     router = Router(records, decisions)
     pairs = [c for c in cases.values() if c.get('kind') in {'identity', 'family'}
@@ -62,21 +105,10 @@ def build_groups(records, cases, decisions=(), policy=None):
         # The published group already settles these comparisons. No new question.
         if len({router._find('child', sid) for sid in ids}) == 1:
             continue
-        passed, gaps, conflicts, restrictions = [], [], [], []
-        for a, b in combinations(ids, 2):
-            if hard_conflict(prepared[a], prepared[b]):
-                conflicts.append([a, b])
-            key = tuple(sorted((router._find('child', a), router._find('child', b))))
-            if key in router.forbidden['child']:
-                restrictions.append([a, b])
-            rule = automatic_rule(prepared[a], prepared[b], policy)
-            (passed if rule else gaps).append({'a': a, 'b': b, 'rule': rule})
-        # A conflicting member reached through an existing group must never be
-        # hidden by the clean representative pair.
-        from .review_dispatch import ELIGIBLE, _birthday
-        incomplete = any(not _birthday(records[sid]) or str(records[sid].get('gender')) not in {'0','1'}
-                         or not records[sid].get('school') or not prepared[sid]['contacts']
-                         or records[sid].get('status') not in ELIGIBLE for sid in ids)
+        passed, gaps, conflicts, restrictions = _group_pair_evidence(ids, prepared, router, policy)
+        # Check every member: a clean representative must not conceal a
+        # conflicting or incomplete response inherited from an existing identity.
+        incomplete = _has_incomplete_members(ids, records, prepared)
         problem = bool(conflicts or restrictions or incomplete)
         gap = next((p for p in gaps if router._find('child', p['a']) != router._find('child', p['b'])), None)
         exemplar = gap or {'a': candidates[0]['record_a'], 'b': candidates[0]['record_b']}
@@ -84,8 +116,7 @@ def build_groups(records, cases, decisions=(), policy=None):
         components = direct_components(ids, passed)
         linked = len(components) == 1
         unresolved = [p for p in gaps if router._find('child', p['a']) != router._find('child', p['b'])]
-        issue = ('identity_conflict' if conflicts else 'manual_nonmatch' if restrictions else 'incomplete_members' if incomplete else
-                 'contact_bridge' if linked else 'contact_gap')
+        issue = _group_issue(conflicts, restrictions, incomplete, linked)
         gid = 'GROUP_' + digest(['child_review_v1', ids])[:28]
         groups[gid] = {'case_id': gid, 'kind': 'identity', 'rule': 'child_group_' + issue,
             'status': 'pending', 'record_a': a, 'record_b': b,
@@ -107,6 +138,7 @@ def build_groups(records, cases, decisions=(), policy=None):
 
 
 def snapshot(ctx, case, record_snapshot):
+    """Freeze complete group evidence and constraints for later version checks."""
     ids = set(case['group_review']['members'])
     records = {sid: record_snapshot(ctx.records[sid]) for sid in sorted(ids)}
     candidates = sorted((c for c in ctx.cases.values() if not c.get('group_review')
@@ -151,6 +183,7 @@ def commands(ctx, task, answer, resolution, base_command):
             raise PipelineError('group_partition 必須完整涵蓋本組，每份提交只可出現一次')
     rows = [header]
     generated = set()
+
     def append(a, b, verdict):
         a, b = sorted((a, b))
         if (a, b) in generated:

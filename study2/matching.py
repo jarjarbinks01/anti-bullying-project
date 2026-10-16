@@ -47,7 +47,9 @@ def child_roll(r: dict) -> str:
 
 
 def validate_manual_links(links, forbidden):
+    """Reject direct or transitive LINK paths that cross an explicit UNLINK."""
     parent = {}
+
     def find(s):
         parent.setdefault(s, s)
         while parent[s] != s:
@@ -95,49 +97,122 @@ def one_digit_phone(a: str, b: str) -> bool:
 
 
 def automatic_rule(a: dict, b: dict, policy: dict | None = None) -> str | None:
+    """Return one accepted direct child rule, or None when evidence is insufficient."""
     if strict_evidence(a, b):
         return "exact_school_contact_child_demo"
     policy = policy or {}
-    if not (a.get("dob") and a["dob"] == b.get("dob") and a.get("gender") and
-            a["gender"] == b.get("gender") and a.get("school") and b.get("school")) or hard_conflict(a, b):
+    same_child_demographics = (
+        a.get("dob") and a["dob"] == b.get("dob")
+        and a.get("gender") and a["gender"] == b.get("gender")
+        and a.get("school") and b.get("school")
+    )
+    if not same_child_demographics or hard_conflict(a, b):
         return None
-    if policy.get("allow_one_digit_phone") and a["school"] == b["school"] and any(
-            one_digit_phone(x, y) for x in a["contacts"] for y in b["contacts"]):
+    if (
+        policy.get("allow_one_digit_phone")
+        and a["school"] == b["school"]
+        and any(one_digit_phone(left, right) for left in a["contacts"] for right in b["contacts"])
+    ):
         return "one_digit_phone_school_child_demo"
-    if policy.get("allow_school_transfer") and a["school"] != b["school"] and a["contacts"] & b["contacts"]:
+    if (
+        policy.get("allow_school_transfer")
+        and a["school"] != b["school"]
+        and a["contacts"] & b["contacts"]
+    ):
         return "exact_contact_school_transfer_child_demo"
     return None
 
 
+def _decision_source_changed(payload, ids, by_id):
+    """Identity links follow frozen evidence; other overrides require exact versions."""
+    changed = any(sid not in by_id for sid in ids)
+    for sid in ids:
+        if sid not in by_id:
+            continue
+        side = "a" if sid == payload["record_a"] else "b"
+        evidence = payload.get("evidence_" + side)
+        same_evidence = evidence is not None and identity_evidence_matches(by_id[sid], evidence)
+        if payload["action"] in {"LINK", "UNLINK"} and evidence is not None:
+            changed |= not same_evidence
+        else:
+            changed |= by_id[sid]["version_id"] != payload.get("version_" + side)
+    return changed
+
+
+def _ambiguous_direct_nodes(strict_edges, by_id, policy):
+    """Find non-clique components before accepting any edge.
+
+    The initial pass requires every cross-pair to satisfy a direct rule. The
+    later optional contact-component pass applies its own whole-group checks.
+    """
+    adjacency = defaultdict(set)
+    for a, b, _ in strict_edges:
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+    visited, ambiguous_nodes = set(), set()
+    for seed in sorted(adjacency):
+        if seed in visited:
+            continue
+        stack, comp = [seed], set()
+        while stack:
+            node = stack.pop()
+            if node in comp:
+                continue
+            comp.add(node)
+            stack.extend(adjacency[node] - comp)
+        visited.update(comp)
+        if any(not automatic_rule(by_id[a], by_id[b], policy) for a, b in combinations(comp, 2)):
+            ambiguous_nodes.update(comp)
+    return ambiguous_nodes
+
+
+def _safe_contact_component(ids, by_id, reopened_ids, forbidden):
+    """Require complete, consistent child evidence and respect manual restrictions."""
+    rows = [by_id[sid] for sid in ids]
+    try:
+        complete = all(
+            date.fromisoformat(text(record.get('dob')))
+            and text(record.get('gender')) in {'0', '1'}
+            and record.get('school')
+            and record['contacts']
+            and record['status'] == 'eligible'
+            for record in rows
+        )
+    except ValueError:
+        complete = False
+    if not complete:
+        return False
+    return not (
+        len({record.get('dob') for record in rows}) != 1
+        or len({record.get('gender') for record in rows}) != 1
+        or ids & reopened_ids
+        or any(left in ids and right in ids for left, right in forbidden)
+    )
+
+
 def link_records(records: list[dict], decisions: list[dict], policy: dict | None = None) -> tuple[list[list[str]], list[dict], list[dict]]:
+    """Apply manual decisions, discover direct evidence, then confirm safe groups.
+
+    Mutates record eligibility/contact annotations and returns stable membership,
+    candidate audit rows and manual-decision events. Identity comes before any
+    repeat collapse or T0/T1 selection.
+    """
     by_id = {r["submission_id"]: r for r in records}
     for r in records:
         r["contacts"] = contacts(r["answer"])
-    eligible = [r for r in records if r["status"] == "eligible"]
-    parent = {r["submission_id"]: r["submission_id"] for r in eligible}
-    members = {sid: {sid} for sid in parent}
     forbidden = set()
     applied = []
     manual_links = []
     overrides = {}
     reopened_ids = set()
+    # 1. Revalidate saved decisions before changing eligibility or identity.
     for d in decisions:
         p = d["payload"]
         if p["action"] in {"LINK_ADULT", "UNLINK_ADULT"}:
             continue  # Independent adult evidence is evaluated after child linkage.
         ids = [p["record_a"]] + ([p.get("record_b")] if p.get("record_b") else [])
         action = p["action"]
-        changed = any(i not in by_id for i in ids)
-        for i in ids:
-            if i not in by_id:
-                continue
-            suffix = "a" if i == p["record_a"] else "b"
-            evidence = p.get("evidence_" + suffix)
-            same_evidence = evidence is not None and identity_evidence_matches(by_id[i], evidence)
-            if action in {"LINK", "UNLINK"} and evidence is not None:
-                changed |= not same_evidence
-            else:
-                changed |= by_id[i]["version_id"] != p.get("version_" + suffix)
+        changed = _decision_source_changed(p, ids, by_id)
         if changed:
             applied.append({"decision_id": d["decision_id"], "status": "reopened", "message": "Source changed or record is outside current batch"})
             reopened_ids.update(i for i in ids if i in by_id)
@@ -199,6 +274,7 @@ def link_records(records: list[dict], decisions: list[dict], policy: dict | None
     for a, b in manual_links:
         if not union(a, b, manual=True):
             raise PipelineError("Manual LINK refers to an ineligible submission; resolve exclusion first")
+    # 2. Generate candidates; shared contact alone never establishes a child.
     blocks = defaultdict(list)
     for r in eligible:
         if r.get("dob") and r.get("gender"):
@@ -236,26 +312,10 @@ def link_records(records: list[dict], decisions: list[dict], policy: dict | None
             kind = "family" if a["role"] != b["role"] else "identity"
             c = candidate(a, b, kind, "contact_missing_or_conflicting_child_demo", "pending", "Shared contact alone cannot identify a child; possible sibling or data-entry error")
             cases.setdefault(c["case_id"], c)
+    # 3. Confirm unique direct-rule cliques before optional contact bridges.
     # Determine strict connected components before consuming any candidate. A
     # non-clique component stays pending in full rather than choosing its first edge.
-    adjacency = defaultdict(set)
-    for a, b, _ in strict_edges:
-        adjacency[a].add(b)
-        adjacency[b].add(a)
-    visited, ambiguous_nodes = set(), set()
-    for seed in sorted(adjacency):
-        if seed in visited:
-            continue
-        stack, comp = [seed], set()
-        while stack:
-            node = stack.pop()
-            if node in comp:
-                continue
-            comp.add(node)
-            stack.extend(adjacency[node] - comp)
-        visited.update(comp)
-        if any(not automatic_rule(by_id[a], by_id[b], policy) for a, b in combinations(comp, 2)):
-            ambiguous_nodes.update(comp)
+    ambiguous_nodes = _ambiguous_direct_nodes(strict_edges, by_id, policy)
     for a, b, c in sorted(strict_edges):
         if a not in ambiguous_nodes and b not in ambiguous_nodes and union(a, b):
             c.update(status="confirmed", reason="Unique consistent component under the research-approved rules")
@@ -273,6 +333,8 @@ def link_records(records: list[dict], decisions: list[dict], policy: dict | None
         if a in parent and b in parent and find(a) == find(b):
             c = candidate(by_id[a], by_id[b], "family" if by_id[a]["role"] != by_id[b]["role"] else "identity", "manual_link", "confirmed", "Reviewer-confirmed child identity")
             cases[c["case_id"]] = c
+    # 4. Optionally confirm complete contact-connected subgroups. Scientific
+    # scope construction remains independent of helper-card dispatch eligibility.
     if (policy or {}).get("allow_contact_bridge_components"):
         from .review_groups import build_groups, direct_components
         # Candidate scopes still include all existing manual/clique members.
@@ -298,16 +360,7 @@ def link_records(records: list[dict], decisions: list[dict], policy: dict | None
                     continue  # Singletons and already confirmed identities need no new decision.
                 if any(not members[find(sid)] <= ids for sid in ids):
                     continue  # Keep existing/manual identities atomic, including hidden members.
-                rows = [by_id[sid] for sid in ids]
-                try:
-                    complete = all(date.fromisoformat(text(r.get('dob'))) and
-                        text(r.get('gender')) in {'0', '1'} and r.get('school') and r['contacts'] and
-                        r['status'] == 'eligible' for r in rows)
-                except ValueError:
-                    complete = False
-                if (not complete or len({r.get('dob') for r in rows}) != 1 or
-                        len({r.get('gender') for r in rows}) != 1 or ids & reopened_ids or
-                        any(a in ids and b in ids for a, b in forbidden)):
+                if not _safe_contact_component(ids, by_id, reopened_ids, forbidden):
                     continue
                 whole = ids == set(proof['members'])
                 gid = group['case_id'] if whole else 'GROUP_' + digest(['child_review_v1', sorted(ids)])[:28]
@@ -332,6 +385,7 @@ def link_records(records: list[dict], decisions: list[dict], policy: dict | None
                         review_group_id=group['case_id'], scope='contact_subgroup')
                 audit.update(case_id=gid, component_evidence=evidence)
                 cases[gid] = audit
+    # 5. Keep pending/background evidence even for already confirmed subgroups.
     pending_ids = {sid for c in cases.values() if c["status"] == "pending" for sid in [c["record_a"], c["record_b"]] if sid}
     for r in eligible:
         r["identity_pending"] = r["submission_id"] in pending_ids
@@ -352,7 +406,13 @@ def link_records(records: list[dict], decisions: list[dict], policy: dict | None
 
 def assign_children(db, run_id: str, groups: list[list[str]]) -> dict[str, str]:
     # Reuse prior published child anchors, unaffected by input order or new rows.
-    previous = db.execute("SELECT i.submission_id,i.child_id,c.anchor_submission_id FROM identity_members i JOIN children c USING(child_id) JOIN releases r ON i.run_id=r.run_id JOIN publication p ON r.release_id=p.release_id").fetchall()
+    previous = db.execute("""
+        SELECT i.submission_id, i.child_id, c.anchor_submission_id
+        FROM identity_members i
+        JOIN children c USING(child_id)
+        JOIN releases r ON i.run_id = r.run_id
+        JOIN publication p ON r.release_id = p.release_id
+    """).fetchall()
     prev = {r["submission_id"]: (r["child_id"], r["anchor_submission_id"]) for r in previous}
     result = {}
     used = set()
@@ -374,6 +434,11 @@ def select_waves(records: list[dict], children: dict[str, str], duplicate_days: 
                  followup_days: int = 90, parent_requires_same_adult: bool = False,
                  matching_policy: dict | None = None, adult_decisions: list[dict] | None = None,
                  parent_wave_policy: str | None = None) -> tuple[list[dict], list[dict]]:
+    """Select measurements after identity is fixed, preserving original rows.
+
+    Student T0 is never displaced by a repeat. Parent selection delegates to
+    the configured student-anchored policy rather than changing child identity.
+    """
     from .parent_waves import validate_policy
     validate_policy(parent_wave_policy)
     groups = defaultdict(list)
@@ -388,6 +453,7 @@ def select_waves(records: list[dict], children: dict[str, str], duplicate_days: 
         adult_state = adult_decision_state(records, adult_decisions or [])
     for (child, role), group in groups.items():
         repeat_members = {r['submission_id']: [r] for r in group}
+
         def same_respondent(a, b):
             if role != "parent" or not parent_requires_same_adult:
                 return True
@@ -396,7 +462,11 @@ def select_waves(records: list[dict], children: dict[str, str], duplicate_days: 
             return all(classify_adult(x, y, matching_policy, adult_state)[0] == "confirmed"
                        for x in repeat_members[a['submission_id']]
                        for y in repeat_members[b['submission_id']])
-        trusted = [r for r in group if timestamp(r.get("observed_at")) is not None and r["time_confidence"] in {"observed", "manual_verified", "accepted_creation_time"}]
+        trusted = [
+            record for record in group
+            if timestamp(record.get("observed_at")) is not None
+            and record["time_confidence"] in {"observed", "manual_verified", "accepted_creation_time"}
+        ]
         unknown = [r for r in group if r not in trusted]
         for r in unknown:
             cases.append(candidate(r, None, "date", "unreliable_date", "pending", "Batch/unknown date cannot establish submission order or 90-day interval"))
@@ -434,7 +504,12 @@ def select_waves(records: list[dict], children: dict[str, str], duplicate_days: 
             if gap < timedelta(days=followup_days):
                 r["status"] = "short_interval_followup"
                 continue
-            while kept and same_respondent(kept[-1], r) and (timestamp(r["observed_at"]) - timestamp(kept[-1]["observed_at"])) < timedelta(days=duplicate_days):
+            while (
+                kept
+                and same_respondent(kept[-1], r)
+                and timestamp(r["observed_at"]) - timestamp(kept[-1]["observed_at"])
+                    < timedelta(days=duplicate_days)
+            ):
                 earlier = kept[-1]
                 if earlier.get("manual_keep") or r.get("manual_keep"):
                     break

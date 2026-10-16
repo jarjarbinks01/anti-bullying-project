@@ -54,7 +54,19 @@ def _birthday(record):
         return None
 
 
+def _review_contacts(record, kind):
+    """Use the same contact scope as the corresponding identity review card."""
+    if kind == 'respondent':
+        return set(adult_evidence(record)['all_contacts'])
+    return contacts(record.get('answer', {}))
+
+
 class Router:
+    """Separate scientific comparison eligibility from actionable worker tasks.
+
+    Base checks protect candidate scopes. Dispatch may park an eligible scope
+    when no concrete evidence can answer it; parking never creates NONMATCH.
+    """
     def __init__(self, records, decisions=(), evidence=None):
         self.records = records
         self.evidence = evidence or {}
@@ -109,6 +121,7 @@ class Router:
         self.parents[kind][max(a, b)] = min(a, b)
 
     def _base_classify(self, case):
+        """Validate roles, evidence completeness and manual restrictions in order."""
         def result(route, *reasons):
             return {'route': route, 'reasons': list(reasons)}
         if case.get('group_review'):
@@ -139,8 +152,7 @@ class Router:
             return result('background', *contradictions)
         # Phone omitted is not equivalent to untraceable: an email is sufficient.
         # Use the contact parser shown on the corresponding identity card.
-        contact_sets = [(set(adult_evidence(r)['all_contacts']) if kind == 'respondent'
-                         else contacts(r.get('answer', {}))) for r in (a, b)]
+        contact_sets = [_review_contacts(record, kind) for record in (a, b)]
         if any(not values for values in contact_sets):
             return result('untraceable', 'no_usable_contact')
         missing = []
@@ -174,6 +186,7 @@ class Router:
         return self._base_classify(case)['route'] == 'review'
 
     def classify(self, case):
+        """Only ask a worker a question supported by concrete available evidence."""
         base = self._base_classify(case)
         if base['route'] != 'review' or case.get('status') != 'pending':
             return base
@@ -185,12 +198,11 @@ class Router:
                 return {'route': 'awaiting_evidence', 'reasons': ['group_no_verifiable_bridge']}
             return base
         a, b = (self.records[case[key]] for key in ('record_a', 'record_b'))
-        values = [(set(adult_evidence(r)['all_contacts']) if case['kind'] == 'respondent'
-                   else contacts(r.get('answer', {}))) for r in (a, b)]
+        values = [_review_contacts(record, case['kind']) for record in (a, b)]
         if values[0] & values[1]:
             return base
-        reason = ('unverified_contact_discrepancy' if any(fuzzy_phone(x,y) for x in values[0] for y in values[1])
-                  else 'no_specific_link_evidence')
+        similar_contact = any(fuzzy_phone(left, right) for left in values[0] for right in values[1])
+        reason = 'unverified_contact_discrepancy' if similar_contact else 'no_specific_link_evidence'
         return {'route': 'awaiting_evidence', 'reasons': [reason]}
 
     def eligible(self, case, purpose='review'):
@@ -204,7 +216,32 @@ class Router:
         raise ValueError('Unknown review purpose')
 
 
+def _workspace_queue_state(work):
+    """Read active task ownership and latest answers without modifying history."""
+    assigned, labels, unfinished = set(), defaultdict(set), set()
+    if work is None:
+        return assigned, labels, unfinished
+    assigned = {row[0] for row in work.execute(
+        "SELECT case_id FROM tasks WHERE state NOT IN ('cancelled','stale')"
+    )}
+    latest_answers = work.execute("""
+        SELECT t.case_id, r.payload
+        FROM reviews r JOIN tasks t ON t.id = r.task_id
+        WHERE t.state NOT IN ('cancelled','stale')
+          AND r.revision = (
+              SELECT MAX(r2.revision) FROM reviews r2 WHERE r2.task_id = r.task_id
+          )
+    """)
+    for row in latest_answers:
+        labels[row[0]].add(json.loads(row[1])['label'])
+    unfinished = {row[0] for row in work.execute(
+        "SELECT case_id FROM tasks WHERE state IN ('assigned','submitted')"
+    )}
+    return assigned, labels, unfinished
+
+
 def summary(ctx, work=None, include_cases=False):
+    """Count tasks separately from raw pair comparisons and parked evidence."""
     router = Router(ctx.records, ctx.decisions, getattr(ctx, 'review_evidence', {}))
     routed = {cid: router.classify(c) for cid, c in ctx.cases.items()}
     pending = {cid for cid, c in ctx.cases.items() if c['kind'] in {'identity', 'family', 'respondent'}
@@ -218,16 +255,8 @@ def summary(ctx, work=None, include_cases=False):
     adults = {cid for cid in comparisons if ctx.cases[cid]['kind'] == 'respondent'}
     reviewable = group_ids | adults
     covered = {cid: gid for gid, g in groups.items() for cid in g['group_review']['comparison_ids']}
-    assigned, labels = set(), defaultdict(set)
-    if work is not None:
-        assigned = {r[0] for r in work.execute("SELECT case_id FROM tasks WHERE state NOT IN ('cancelled','stale')")}
-        for row in work.execute("SELECT t.case_id,r.payload FROM reviews r JOIN tasks t ON t.id=r.task_id "
-                                "WHERE t.state NOT IN ('cancelled','stale') AND r.revision="
-                                "(SELECT MAX(r2.revision) FROM reviews r2 WHERE r2.task_id=r.task_id)"):
-            labels[row[0]].add(json.loads(row[1])['label'])
+    assigned, labels, unfinished = _workspace_queue_state(work)
     resolved = {cid for cid, values in labels.items() if len(values) == 1 and values <= {'MATCH', 'NONMATCH'}}
-    unfinished = ({r[0] for r in work.execute("SELECT case_id FROM tasks WHERE state IN ('assigned','submitted')")}
-                  if work is not None else set())
     legacy_assigned_members = {sid for cid in unfinished if cid in ctx.cases and cid not in groups
                                and ctx.cases[cid]['kind'] in {'identity','family'}
                                and router.eligible(ctx.cases[cid])
@@ -295,63 +324,129 @@ def queue_snapshot(cfg, include_cases=False):
             work.close()
 
 
-def export_waiting_dataset(cfg, output):
-    """Freeze unresolved evidence, without decisions or changes to live state."""
+def _write_waiting_case(snapshot, ctx, case, seen):
+    """Copy identity/provenance only, with complete comparison coverage."""
     from itertools import combinations
-    from .review_core import Context,record_snapshot
+    from .review_core import record_snapshot
+
+    group = case.get('group_review')
+    ids = group['members'] if group else [case['record_a'], case['record_b']]
+    snapshot.execute(
+        'INSERT INTO cases VALUES(?,?,?,?)',
+        (case['case_id'], case['kind'], 'awaiting_evidence', dumps(case)),
+    )
+    for sid in ids:
+        if sid not in seen:
+            record = record_snapshot(ctx.records[sid])
+            snapshot.execute(
+                'INSERT INTO members VALUES(?,?,?,?,?)',
+                (sid, record['version_id'], record['role'], record['child_id'], dumps(record)),
+            )
+            seen.add(sid)
+        snapshot.execute('INSERT INTO case_members VALUES(?,?)', (case['case_id'], sid))
+    direct_rules = {
+        tuple(sorted((pair['a'], pair['b']))): pair['rule'] for pair in group['passed_pairs']
+    } if group else {}
+    for left, right in combinations(sorted(ids), 2):
+        same_child = bool(
+            ctx.records[left].get('child_id')
+            and ctx.records[left]['child_id'] == ctx.records[right].get('child_id')
+        )
+        snapshot.execute(
+            'INSERT INTO comparisons VALUES(?,?,?,?,?)',
+            (case['case_id'], left, right, direct_rules.get((left, right)), int(same_child)),
+        )
+
+
+def export_waiting_dataset(cfg, output):
+    """Freeze unresolved evidence, without decisions or changes to live state.
+
+    The output is a reference snapshot, not a review answer/import package.
+    Existing output folders are rejected to preserve fixed-version evidence.
+    """
+    from .review_core import Context
     from .store import connect
-    from .common import digest
-    output=Path(output)
+    from .common import PipelineError, digest
+
+    output = Path(output)
     if output.exists():
-        from .common import PipelineError
         raise PipelineError('固定資料集不可覆寫，請使用新資料夾')
-    main=connect(Path(cfg['state_dir']),readonly=True)
+    main = connect(Path(cfg['state_dir']), readonly=True)
     try:
-        ctx=Context(main,cfg);router=Router(ctx.records,ctx.decisions,ctx.review_evidence)
-        cases=[c for c in ctx.cases.values() if c.get('status')=='pending' and
-               (c.get('group_review') or c['kind']=='respondent') and
-               router.classify(c)['route']=='awaiting_evidence']
-        output.mkdir(parents=True,mode=0o700)
-        path=output/'awaiting_evidence.sqlite';snapshot=sqlite3.connect(path)
-        path.chmod(0o600);snapshot.execute('PRAGMA foreign_keys=ON')
-        snapshot.executescript('''CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-          CREATE TABLE cases(case_id TEXT PRIMARY KEY,kind TEXT,route TEXT,payload_json TEXT NOT NULL);
-          CREATE TABLE members(submission_id TEXT PRIMARY KEY,version_id TEXT,role TEXT,child_id TEXT,payload_json TEXT NOT NULL);
-          CREATE TABLE case_members(case_id TEXT REFERENCES cases,submission_id TEXT REFERENCES members,PRIMARY KEY(case_id,submission_id));
-          CREATE TABLE comparisons(case_id TEXT REFERENCES cases,record_a TEXT REFERENCES members,record_b TEXT REFERENCES members,
-            direct_rule TEXT,same_child INTEGER,PRIMARY KEY(case_id,record_a,record_b));''')
-        seen=set()
+        ctx = Context(main, cfg)
+        router = Router(ctx.records, ctx.decisions, ctx.review_evidence)
+        cases = [
+            case for case in ctx.cases.values()
+            if case.get('status') == 'pending'
+            and (case.get('group_review') or case['kind'] == 'respondent')
+            and router.classify(case)['route'] == 'awaiting_evidence'
+        ]
+        output.mkdir(parents=True, mode=0o700)
+        path = output / 'awaiting_evidence.sqlite'
+        snapshot = sqlite3.connect(path)
+        path.chmod(0o600)
+        snapshot.execute('PRAGMA foreign_keys=ON')
+        snapshot.executescript("""
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE cases(
+                case_id TEXT PRIMARY KEY, kind TEXT, route TEXT, payload_json TEXT NOT NULL
+            );
+            CREATE TABLE members(
+                submission_id TEXT PRIMARY KEY, version_id TEXT, role TEXT, child_id TEXT,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE case_members(
+                case_id TEXT REFERENCES cases, submission_id TEXT REFERENCES members,
+                PRIMARY KEY(case_id, submission_id)
+            );
+            CREATE TABLE comparisons(
+                case_id TEXT REFERENCES cases,
+                record_a TEXT REFERENCES members, record_b TEXT REFERENCES members,
+                direct_rule TEXT, same_child INTEGER,
+                PRIMARY KEY(case_id, record_a, record_b)
+            );
+        """)
+        seen = set()
         try:
             with snapshot:
-                for c in sorted(cases,key=lambda c:c['case_id']):
-                    group=c.get('group_review');ids=group['members'] if group else [c['record_a'],c['record_b']]
-                    snapshot.execute('INSERT INTO cases VALUES(?,?,?,?)',(c['case_id'],c['kind'],'awaiting_evidence',dumps(c)))
-                    for sid in ids:
-                        if sid not in seen:
-                            r=record_snapshot(ctx.records[sid]);snapshot.execute('INSERT INTO members VALUES(?,?,?,?,?)',
-                                (sid,r['version_id'],r['role'],r['child_id'],dumps(r)));seen.add(sid)
-                        snapshot.execute('INSERT INTO case_members VALUES(?,?)',(c['case_id'],sid))
-                    direct={tuple(sorted((p['a'],p['b']))):p['rule'] for p in group['passed_pairs']} if group else {}
-                    for a,b in combinations(sorted(ids),2):
-                        snapshot.execute('INSERT INTO comparisons VALUES(?,?,?,?,?)',(c['case_id'],a,b,direct.get((a,b)),
-                            int(bool(ctx.records[a].get('child_id') and ctx.records[a]['child_id']==ctx.records[b].get('child_id')))))
-                metadata={'format_version':1,'dataset_id':'WAIT_'+digest([ctx.release['release_id'],utcnow()])[:28],
-                    'release_id':ctx.release['release_id'],'dispatch_policy':DISPATCH_POLICY,'created_at':utcnow(),
-                    'main_revision':ctx.main_revision,'code_hashes':{p.name:file_hash(p) for p in
-                        [Path(__file__),Path(__file__).with_name('review_groups.py'),Path(__file__).with_name('review_core.py')]},
-                    'child_groups':sum(bool(c.get('group_review')) for c in cases),
-                    'adult_comparisons':sum(c['kind']=='respondent' for c in cases),'unique_submissions':len(seen),
-                    'meaning':'證據不足，暫不合併；不是人工 NONMATCH，不是需要逐宗填卡的清單'}
-                snapshot.executemany('INSERT INTO metadata VALUES(?,?)',[(k,dumps(v)) for k,v in metadata.items()])
-            assert snapshot.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+                for case in sorted(cases, key=lambda item: item['case_id']):
+                    _write_waiting_case(snapshot, ctx, case, seen)
+                metadata = {
+                    'format_version': 1,
+                    'dataset_id': 'WAIT_' + digest([ctx.release['release_id'], utcnow()])[:28],
+                    'release_id': ctx.release['release_id'],
+                    'dispatch_policy': DISPATCH_POLICY,
+                    'created_at': utcnow(),
+                    'main_revision': ctx.main_revision,
+                    'code_hashes': {
+                        code.name: file_hash(code) for code in [
+                            Path(__file__), Path(__file__).with_name('review_groups.py'),
+                            Path(__file__).with_name('review_core.py'),
+                        ]
+                    },
+                    'child_groups': sum(bool(case.get('group_review')) for case in cases),
+                    'adult_comparisons': sum(case['kind'] == 'respondent' for case in cases),
+                    'unique_submissions': len(seen),
+                    'meaning': '證據不足，暫不合併；不是人工 NONMATCH，不是需要逐宗填卡的清單',
+                }
+                snapshot.executemany(
+                    'INSERT INTO metadata VALUES(?,?)',
+                    [(key, dumps(value)) for key, value in metadata.items()],
+                )
+            assert snapshot.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
             assert not snapshot.execute('PRAGMA foreign_key_check').fetchall()
         finally:
             snapshot.close()
-        atomic_json(output/'manifest.json',{**metadata,'files':{'awaiting_evidence.sqlite':file_hash(path)}})
-        (output/'README.md').write_text('# 證據不足，待新資料\n\n此固定版本保留尚未證實的跨子群連結及成人比較，不要求同事猜測身份。\n'
+        atomic_json(output / 'manifest.json', {
+            **metadata, 'files': {'awaiting_evidence.sqlite': file_hash(path)},
+        })
+        (output / 'README.md').write_text(
+            '# 證據不足，待新資料\n\n此固定版本保留尚未證實的跨子群連結及成人比較，不要求同事猜測身份。\n'
             '各子群及原始問卷仍保留；沒有新增 MATCH、NONMATCH 或資料排除。\n'
             '找到可核實來源後，由 Jarvis 登記來源、位置和具體問題，再匯出審核卡。\n'
-            '新問卷可能補上聯絡連結，屆時重新計算；此快照不會自動更新或取代正式資料庫。\n',encoding='utf-8')
-        return {**metadata,'output':str(output)}
+            '新問卷可能補上聯絡連結，屆時重新計算；此快照不會自動更新或取代正式資料庫。\n',
+            encoding='utf-8',
+        )
+        return {**metadata, 'output': str(output)}
     finally:
         main.close()

@@ -81,13 +81,17 @@ def event(db, kind, target, payload):
 
 
 def rules_hash(cfg):
-    hashes={name:file_hash(Path(__file__).parent/name) for name in
-            ('matching.py','respondents.py','review_core.py','review_hints.py','grades.py','common.py')}
-    compatibility=Path(cfg['state_dir'])/'review_rule_compatibility.json'
+    hashes = {
+        name: file_hash(Path(__file__).parent / name) for name in (
+            'matching.py', 'respondents.py', 'review_core.py', 'review_hints.py', 'grades.py', 'common.py',
+        )
+    }
+    compatibility = Path(cfg['state_dir']) / 'review_rule_compatibility.json'
     if compatibility.exists():
-        proof=json.loads(compatibility.read_text())
-        if proof.get('format_version')==1 and proof.get('verified') is True and proof.get('current_code')==hashes:
-            hashes=proof['original_code']
+        proof = json.loads(compatibility.read_text())
+        if (proof.get('format_version') == 1 and proof.get('verified') is True
+                and proof.get('current_code') == hashes):
+            hashes = proof['original_code']
     if cfg.get('parent_wave_policy'):
         hashes = {**hashes, 'parent_waves.py': file_hash(Path(__file__).parent/'parent_waves.py')}
     config = {k: cfg.get(k) for k in ("matching_policy", "date_policy", "duplicate_days",
@@ -111,23 +115,68 @@ def record_snapshot(record):
 
 
 class Context:
+    """Read one published release and construct versioned review evidence.
+
+    Scientific groups are built before any dispatch overlay. Registered
+    evidence can make a group actionable, but never changes its membership.
+    """
+
     def __init__(self, db, cfg):
         self.release = current(db)
         if not self.release:
             raise PipelineError("尚未有發布版本，不能派發身份審核")
-        self.records = {}
-        keys = {"submission_id","version_id","role","answer","source_id","source_label","location",
-                "school","dob","gender","grade","grade_raw","child_id","claimed_wave","selected_wave","observed_at",
-                "time_confidence","date_basis","status","wave_reason","school_type"}
+        self.records = self._load_records(db)
+        self.cases = {
+            row[0]: json.loads(row[1]) for row in db.execute(
+                "SELECT case_id,payload_json FROM release_candidates WHERE release_id=?",
+                (self.release["release_id"],),
+            )
+        }
+        self._index_related_records()
+        self.decisions = active_decisions(db)
+        self.rules = rules_hash(cfg)
+        # A new canonical decision invalidates a preview before pipeline rerun.
+        self.main_revision = digest({
+            "decisions": [dict(decision) for decision in self.decisions],
+            "labels": [dict(row) for row in db.execute("SELECT * FROM labels ORDER BY case_id")],
+        })
+        self._component_cache = {}
+        from .review_groups import build_groups
+        self.group_cases = build_groups(self.records, self.cases, self.decisions, cfg.get('matching_policy'))
+        self.cases.update(self.group_cases)
+        self._dispatch_baselines = {}
+        self.review_evidence = {}
+        self.expired_review_evidence = []
+        self._load_review_evidence(Path(cfg['state_dir']) / 'review.sqlite')
+        self._apply_dispatch_overlay()
+
+    def _load_records(self, db):
+        """Read identity fields and provenance, excluding survey-scale answers."""
         from .storage import read_records
-        for rec in read_records(db,self.release['run_id'],include_raw=False):
-            rec['school_type'] = rec.get('school_type') or rec['answer'].get('school_type')
-            rec['answer'] = {k:v for k,v in rec['answer'].items() if k.startswith('contact_') or k in
-                            {'Survey','student_demographics_02','adult_demographics_02','adult_demographics_05',
-                             'adult_demographics_06','adult_demographics_06.1','建立時間'}}
-            self.records[rec['submission_id']] = {k:v for k,v in rec.items() if k in keys}
-        self.cases = {r[0]: json.loads(r[1]) for r in db.execute(
-            "SELECT case_id,payload_json FROM release_candidates WHERE release_id=?", (self.release["release_id"],))}
+
+        keys = {
+            "submission_id", "version_id", "role", "answer", "source_id", "source_label", "location",
+            "school", "dob", "gender", "grade", "grade_raw", "child_id", "claimed_wave", "selected_wave",
+            "observed_at", "time_confidence", "date_basis", "status", "wave_reason", "school_type",
+        }
+        answer_keys = {
+            'Survey', 'student_demographics_02', 'adult_demographics_02', 'adult_demographics_05',
+            'adult_demographics_06', 'adult_demographics_06.1', '建立時間',
+        }
+        records = {}
+        for record in read_records(db, self.release['run_id'], include_raw=False):
+            record['school_type'] = record.get('school_type') or record['answer'].get('school_type')
+            record['answer'] = {
+                key: value for key, value in record['answer'].items()
+                if key.startswith('contact_') or key in answer_keys
+            }
+            records[record['submission_id']] = {
+                key: value for key, value in record.items() if key in keys
+            }
+        return records
+
+    def _index_related_records(self):
+        """Index raw comparisons before synthesized group cases are added."""
         self.by_sid, self.by_child = defaultdict(list), defaultdict(set)
         for case in self.cases.values():
             for sid in (case["record_a"], case["record_b"]):
@@ -136,44 +185,44 @@ class Context:
         for sid, record in self.records.items():
             if record.get("child_id"):
                 self.by_child[record["child_id"]].add(sid)
-        self.decisions = active_decisions(db)
-        self.rules = rules_hash(cfg)
-        # Any new canonical decision invalidates a preview, even before rerunning.
-        self.main_revision = digest({"decisions": [dict(d) for d in self.decisions],
-            "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")]})
-        self._component_cache={}
-        from .review_groups import build_groups
-        self.group_cases = build_groups(self.records, self.cases, self.decisions, cfg.get('matching_policy'))
-        self.cases.update(self.group_cases)
-        self._dispatch_baselines = {}
-        self.review_evidence = {}
-        self.expired_review_evidence = []
-        path = Path(cfg['state_dir'])/'review.sqlite'
-        if path.exists():
-            evidence_db = sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)
-            try:
-                exists = evidence_db.execute("SELECT 1 FROM sqlite_master WHERE name='review_evidence_leads'").fetchone()
-                latest = {}
-                if exists:
-                    for cid, signature, payload in evidence_db.execute('SELECT case_id,signature,payload FROM review_evidence_leads ORDER BY created_at,lead_id'):
-                        latest[cid] = (signature,json.loads(payload))
-                for cid,(signature,payload) in latest.items():
-                    if cid in self.cases and self.dispatch_signature(cid) == signature:
-                        self.review_evidence[cid] = payload
-                    else:
-                        self.expired_review_evidence.append(cid)
-            finally:
-                evidence_db.close()
+
+    def _load_review_evidence(self, path):
+        """Carry only the newest registered source whose complete evidence matches."""
+        if not path.exists():
+            return
+        evidence_db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+        try:
+            exists = evidence_db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='review_evidence_leads'"
+            ).fetchone()
+            latest = {}
+            if exists:
+                for case_id, signature, payload in evidence_db.execute("""
+                    SELECT case_id, signature, payload FROM review_evidence_leads
+                    ORDER BY created_at, lead_id
+                """):
+                    latest[case_id] = (signature, json.loads(payload))
+            for case_id, (signature, payload) in latest.items():
+                if case_id in self.cases and self.dispatch_signature(case_id) == signature:
+                    self.review_evidence[case_id] = payload
+                else:
+                    self.expired_review_evidence.append(case_id)
+        finally:
+            evidence_db.close()
+
+    def _apply_dispatch_overlay(self):
+        """Annotate work routing without changing scientific group evidence."""
         from .review_dispatch import Router
-        router = Router(self.records,self.decisions,self.review_evidence)
-        for cid,case in self.group_cases.items():
+
+        router = Router(self.records, self.decisions, self.review_evidence)
+        for case_id, case in self.group_cases.items():
             group = case['group_review']
-            route=router.classify(case)['route']
-            if route != group['route'] or cid in self.review_evidence:
+            route = router.classify(case)['route']
+            if route != group['route'] or case_id in self.review_evidence:
                 group['eligibility_route'] = group['route']
                 group['route'] = route
-            if cid in self.review_evidence:
-                group['verification_source'] = self.review_evidence[cid]
+            if case_id in self.review_evidence:
+                group['verification_source'] = self.review_evidence[case_id]
 
     def dispatch_signature(self, case_id):
         """Evidence-lead validity excludes the lead itself and dispatch overlay."""
@@ -182,9 +231,9 @@ class Context:
                 from .review_groups import snapshot
                 case = copy.deepcopy(self.group_cases[case_id])
                 group = case['group_review']
-                group['route'] = group.pop('eligibility_route',group['route'])
-                group.pop('verification_source',None)
-                self._dispatch_baselines[case_id] = snapshot(self,case,record_snapshot)['signature']
+                group['route'] = group.pop('eligibility_route', group['route'])
+                group.pop('verification_source', None)
+                self._dispatch_baselines[case_id] = snapshot(self, case, record_snapshot)['signature']
             else:
                 self._dispatch_baselines[case_id] = self._component(case_id)[1]['signature']
         return self._dispatch_baselines[case_id]
@@ -194,35 +243,26 @@ class Context:
             from .review_groups import snapshot
             case = self.group_cases[case_id]
             return {'case': copy.deepcopy(case), **snapshot(self, case, record_snapshot)}
-        case,component=self._component(case_id)
-        # Callers historically receive independent frozen dictionaries.
-        result = {'case':case,**copy.deepcopy(component)}
+        case, component = self._component(case_id)
+        # Copy the shared component; preserve the historical case-reference contract.
+        result = {'case': case, **copy.deepcopy(component)}
         if case_id in self.review_evidence:
             lead = self.review_evidence[case_id]
             result['verification_source'] = copy.deepcopy(lead)
-            result['signature'] = digest([result['signature'],lead])
+            result['signature'] = digest([result['signature'], lead])
         return result
 
-    def signature(self,case_id):
-        if case_id in self.group_cases:
-            return self.snapshot(case_id)['signature']
+    def signature(self, case_id):
         return self.snapshot(case_id)['signature']
 
-    def _component(self,case_id):
-        case = self.cases.get(case_id)
-        if not case or case["kind"] not in KINDS or not case.get("record_b"):
-            raise PipelineError("個案已失效或不是兩份提交的身份比較：" + case_id)
-        ids = {case["record_a"], case["record_b"]}
-        if not ids <= self.records.keys():
-            raise PipelineError("提交已失效，請重新派發：" + case_id)
-        cached=self._component_cache.get(case['record_a'])
-        if cached is not None:
-            return case,cached
+    def _related_submission_ids(self, ids, case_id):
+        """Include competing candidates and existing child members in a snapshot.
+
+        Evidence outside the two displayed endpoints can change their meaning;
+        a stale endpoint or neighbor therefore blocks carry-forward.
+        """
         related = set(ids)
         pending = list(ids)
-        # A competing candidate's group can change the interpretation of this pair.
-        # Freeze the complete connected identity component, including group members,
-        # so changed evidence beyond the two endpoints cannot silently carry forward.
         while pending:
             sid = pending.pop()
             nearby = set(self.by_child.get(self.records[sid].get("child_id"), set()))
@@ -234,6 +274,19 @@ class Context:
             added = nearby - related
             related.update(added)
             pending.extend(added)
+        return related
+
+    def _component(self, case_id):
+        case = self.cases.get(case_id)
+        if not case or case["kind"] not in KINDS or not case.get("record_b"):
+            raise PipelineError("個案已失效或不是兩份提交的身份比較：" + case_id)
+        ids = {case["record_a"], case["record_b"]}
+        if not ids <= self.records.keys():
+            raise PipelineError("提交已失效，請重新派發：" + case_id)
+        cached = self._component_cache.get(case['record_a'])
+        if cached is not None:
+            return case, cached
+        related = self._related_submission_ids(ids, case_id)
         neighbors = {c["case_id"]: c for sid in related for c in self.by_sid[sid]
                      if c["record_a"] in related and (not c["record_b"] or c["record_b"] in related)}
         records = {sid: record_snapshot(self.records[sid]) for sid in sorted(related)}
@@ -246,67 +299,101 @@ class Context:
         constraints = [d["payload"] for d in self.decisions
                        if {d["payload"].get("record_a"), d["payload"].get("record_b")} & related]
         signature = digest({"evidence": evidence, "candidates": candidates, "rules": self.rules})
-        component={"records": records, "candidates": candidates,
-                "release_id": self.release["release_id"], "rules_hash": self.rules, "signature": signature,
-                "original_manual_constraints": constraints}
-        for sid in related:self._component_cache[sid]=component
-        return case,component
+        component = {
+            "records": records, "candidates": candidates,
+            "release_id": self.release["release_id"], "rules_hash": self.rules, "signature": signature,
+            "original_manual_constraints": constraints,
+        }
+        for sid in related:
+            self._component_cache[sid] = component
+        return case, component
 
 
 def stratified_cases(cases, reviewer, limit):
-    buckets=defaultdict(list)
-    for case in sorted(cases,key=lambda c:digest([reviewer,c['case_id']])):
-        buckets[(case['kind'],case['status'],case['rule'])].append(case)
-    selected,offsets=[],Counter()
-    statuses=['confirmed','pending','rejected','unmatched']
-    statuses += sorted({c['status'] for c in cases}-set(statuses))
-    while any(buckets.values()) and len(selected)<limit:
+    """Sample reproducibly, rotating through status, kind and rule buckets."""
+    buckets = defaultdict(list)
+    for case in sorted(cases, key=lambda item: digest([reviewer, item['case_id']])):
+        buckets[(case['kind'], case['status'], case['rule'])].append(case)
+    selected, offsets = [], Counter()
+    statuses = ['confirmed', 'pending', 'rejected', 'unmatched']
+    statuses += sorted({case['status'] for case in cases} - set(statuses))
+    while any(buckets.values()) and len(selected) < limit:
         for status in statuses:
             for kind in KINDS:
-                keys=sorted(k for k,v in buckets.items() if v and k[:2]==(kind,status))
-                if keys and len(selected)<limit:
-                    key=keys[offsets[(kind,status)]%len(keys)]
-                    offsets[(kind,status)]+=1
+                keys = sorted(key for key, values in buckets.items() if values and key[:2] == (kind, status))
+                if keys and len(selected) < limit:
+                    key = keys[offsets[(kind, status)] % len(keys)]
+                    offsets[(kind, status)] += 1
                     selected.append(buckets[key].pop())
     return selected
 
 
 def register_review_evidence(cfg, case_id, source, reference, question, reviewer='Jarvis'):
-    """The designated operator records an available source, never a verdict."""
+    """Register an operator-attested available source, never an identity verdict.
+
+    The source is bound to the full scientific evidence signature. Changing
+    that evidence expires the registration rather than silently carrying it.
+    """
     if reviewer != 'Jarvis' or source not in VERIFICATION_SOURCES:
         raise PipelineError('只可由 Jarvis 登記原始紙本、既有收集紀錄或其他已核實來源')
-    reference,question = text(reference),text(question)
+    reference, question = text(reference), text(question)
     if not reference or not question:
         raise PipelineError('必須填寫實際核實來源的位置及具體要核對的問題')
-    main=connect(Path(cfg['state_dir']),readonly=True)
-    work=workspace(cfg)
+    main = connect(Path(cfg['state_dir']), readonly=True)
+    work = workspace(cfg)
     try:
-        ctx=Context(main,cfg)
-        case=ctx.cases.get(case_id)
+        ctx = Context(main, cfg)
+        case = ctx.cases.get(case_id)
         from .review_dispatch import Router
-        if not case or case.get('status')!='pending' or not Router(ctx.records,ctx.decisions).group_candidate(case):
+        if (not case or case.get('status') != 'pending'
+                or not Router(ctx.records, ctx.decisions).group_candidate(case)):
             raise PipelineError('個案失效、已有結論或存在身份／人工限制；須先處理更正或裁定')
-        if case['kind'] in {'identity','family'} and case_id not in ctx.group_cases:
+        if case['kind'] in {'identity', 'family'} and case_id not in ctx.group_cases:
             raise PipelineError('孩子身份來源須登記至完整 GROUP 個案，不能繞過群組限制')
-        signature=ctx.dispatch_signature(case_id)
+        signature = ctx.dispatch_signature(case_id)
         with work:
-            old=work.execute('SELECT payload FROM review_evidence_leads WHERE case_id=? ORDER BY created_at DESC,lead_id DESC LIMIT 1',(case_id,)).fetchone()
+            old = work.execute("""
+                SELECT payload FROM review_evidence_leads WHERE case_id=?
+                ORDER BY created_at DESC, lead_id DESC LIMIT 1
+            """, (case_id,)).fetchone()
             if old:
-                previous=json.loads(old[0])
-                if all(previous.get(k)==v for k,v in {'source':source,'reference':reference,'question':question,'signature':signature}.items()):
-                    return {**previous,'unchanged':True}
-            lead={'lead_id':'EVID_'+uuid.uuid4().hex,'case_id':case_id,'signature':signature,
-                  'source':source,'reference':reference,'question':question,'reviewer':reviewer,'created_at':utcnow()}
-            work.execute('INSERT INTO review_evidence_leads VALUES(?,?,?,?,?)',
-                         (lead['lead_id'],case_id,signature,lead['created_at'],dumps(lead)))
-            event(work,'verification_source_registered',case_id,lead)
+                previous = json.loads(old[0])
+                expected = {'source': source, 'reference': reference, 'question': question, 'signature': signature}
+                if all(previous.get(key) == value for key, value in expected.items()):
+                    return {**previous, 'unchanged': True}
+            lead = {
+                'lead_id': 'EVID_' + uuid.uuid4().hex, 'case_id': case_id, 'signature': signature,
+                'source': source, 'reference': reference, 'question': question,
+                'reviewer': reviewer, 'created_at': utcnow(),
+            }
+            work.execute(
+                'INSERT INTO review_evidence_leads VALUES(?,?,?,?,?)',
+                (lead['lead_id'], case_id, signature, lead['created_at'], dumps(lead)),
+            )
+            event(work, 'verification_source_registered', case_id, lead)
         return lead
     finally:
-        main.close();work.close()
+        main.close()
+        work.close()
+
+
+def _allowed_package_cases(cases, router, purpose):
+    """General work uses child groups/adult pairs; QA uses original comparisons."""
+    return {
+        case['case_id']: case for case in cases
+        if router.eligible(case, purpose)
+        and (purpose != 'review' or case.get('group_review') or case['kind'] == 'respondent')
+        and (purpose == 'review' or not case.get('group_review'))
+    }
 
 
 def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=None,
                    independent=False, replaces=None, purpose='review'):
+    """Assign fixed evidence snapshots without writing formal matching decisions.
+
+    Revalidate existing work, preserve task ownership, select eligible cases,
+    then persist tasks and an optional sealed workbook in one workspace change.
+    """
     reviewer = text(reviewer)
     if not reviewer or limit < 1:
         raise PipelineError("必須指定審核者及正整數宗數")
@@ -328,9 +415,7 @@ def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=No
                  (c.get('group_review') and 'family' in kinds and
                   set(c['group_review']['member_roles']) == {'student','parent'}))]
         router = Router(ctx.records, ctx.decisions,ctx.review_evidence)
-        allowed = {c['case_id']: c for c in valid if router.eligible(c, purpose)
-                   and (purpose != 'review' or c.get('group_review') or c['kind'] == 'respondent')
-                   and (purpose == 'review' or not c.get('group_review'))}
+        allowed = _allowed_package_cases(valid, router, purpose)
         work.execute("BEGIN IMMEDIATE")
         from .review_storage import task_heads
         for old_task in task_heads(work):
@@ -349,9 +434,7 @@ def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=No
             purpose = json.loads(old['payload']).get('purpose', purpose)
             if purpose == 'adjudication' and reviewer != 'Jarvis':
                 raise PipelineError('裁定工作包只可指派給指定執行者 Jarvis')
-            allowed = {c['case_id']: c for c in valid if router.eligible(c, purpose)
-                       and (purpose != 'review' or c.get('group_review') or c['kind'] == 'respondent')
-                       and (purpose == 'review' or not c.get('group_review'))}
+            allowed = _allowed_package_cases(valid, router, purpose)
             if work.execute("SELECT 1 FROM reviews WHERE task_id IN (SELECT id FROM tasks WHERE package_id=?)", (replaces,)).fetchone():
                 raise PipelineError("已交回答案的工作包不能重新指派；請另行安排獨立重審")
             case_ids = [r[0] for r in work.execute("SELECT case_id FROM tasks WHERE package_id=?", (replaces,))]

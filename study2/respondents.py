@@ -17,11 +17,16 @@ def _adult_evidence(r, *, legacy=False):
     # contact extensions are not silently assumed to identify the respondent.
     label = r.get("source_label", text(answer.get("Survey")))
     if "qualtrics" in label or label.startswith(("paperform", "socialworkdream")):
-        own.update(x for x in contacts({"contact_03.1": answer.get("contact_03.1")}, extended_separators=not legacy) if "@" in x)
-    evidence = {"birth_year": text(answer.get("adult_demographics_05")),
-            "relationship": text(answer.get("adult_demographics_06")),
-            "other_relationship": text(answer.get("adult_demographics_06.1")).lower(),
-            "personal_contacts": sorted(own)}
+        email_contacts = contacts(
+            {"contact_03.1": answer.get("contact_03.1")}, extended_separators=not legacy,
+        )
+        own.update(value for value in email_contacts if "@" in value)
+    evidence = {
+        "birth_year": text(answer.get("adult_demographics_05")),
+        "relationship": text(answer.get("adult_demographics_06")),
+        "other_relationship": text(answer.get("adult_demographics_06.1")).lower(),
+        "personal_contacts": sorted(own),
+    }
     if not legacy:
         evidence['all_contacts'] = sorted(contacts(answer, extended_separators=True))
     return evidence
@@ -42,6 +47,7 @@ def adult_evidence_matches(r, saved, saved_version=None):
 
 
 def adult_match(a, b, policy=None):
+    """Check adult evidence only after both responses refer to the same child."""
     if (policy or {}).get('adult_contact_scope', 'any_exact') != 'any_exact':
         raise PipelineError('Unsupported adult contact scope; current research policy is any_exact')
     ea, eb = adult_evidence(a), adult_evidence(b)
@@ -100,13 +106,66 @@ def adult_decision_state(records, decisions):
 
 
 def classify_adult(a, b, policy=None, state=None):
+    """Apply unchanged manual decisions before considering automatic evidence."""
     overrides, reopened = state[:2] if state is not None else ({}, set())
     key = tuple(sorted([a['submission_id'], b['submission_id']]))
     if key in overrides:
-        return ('confirmed', 'reviewer_confirmed_same_adult') if overrides[key] == 'LINK_ADULT' else ('rejected', 'reviewer_rejected_same_adult')
+        if overrides[key] == "LINK_ADULT":
+            return "confirmed", "reviewer_confirmed_same_adult"
+        return "rejected", "reviewer_rejected_same_adult"
     if reopened & set(key):
         return 'pending', 'adult_decision_reopened'
     return adult_match(a, b, policy)
+
+
+def _consistent_adult_matches(baseline, matches, overrides, classify):
+    """Keep reviewed pairs first and require pairwise adult consistency.
+
+    An accepted typo belongs to its reviewed pair. It never grants a third
+    adult profile the same exception through shared contact information.
+    Candidate dictionaries are updated in place for the audit trail.
+    """
+    def profiles_conflict(profiles):
+        return any(
+            classify(left, right)[0] != "confirmed"
+            for index, (left, _) in enumerate(profiles)
+            for right, _ in profiles[index + 1:]
+        )
+
+    reviewed = [
+        (record, case) for record, case in matches
+        if overrides.get(tuple(sorted([baseline["submission_id"], record["submission_id"]])))
+            == "LINK_ADULT"
+    ]
+    if not reviewed:
+        if profiles_conflict(matches):
+            for _, case in matches:
+                case.update(status="pending", reason="Competing or contradictory adult profiles")
+            return []
+        return matches
+
+    if profiles_conflict(reviewed):
+        for _, case in matches:
+            case.update(status="pending", reason="Competing or contradictory reviewed adult profiles")
+        return []
+
+    automatic = []
+    for record, case in matches:
+        if any(record is anchor for anchor, _ in reviewed):
+            continue
+        if all(classify(record, anchor)[0] == "confirmed" for anchor, _ in reviewed):
+            automatic.append((record, case))
+        else:
+            case.update(
+                status="pending", reason="Automatic adult candidate conflicts with an unchanged reviewed pair",
+            )
+    if profiles_conflict(automatic):
+        for _, case in automatic:
+            case.update(
+                status="pending", reason="Competing automatic adult profiles; unchanged reviewed pair retained",
+            )
+        automatic = []
+    return reviewed + automatic
 
 
 def adult_followups(records, decisions, followup_days=90, policy=None, parent_wave_policy=None):
@@ -117,14 +176,13 @@ def adult_followups(records, decisions, followup_days=90, policy=None, parent_wa
     """
     from .parent_waves import validate_policy
     validate_policy(parent_wave_policy)
-    by_id = {r['submission_id']: r for r in records}
     parents = defaultdict(list)
     for r in records:
         if r['role'] == 'parent' and r.get('child_id') and r['status'] in {
                 'eligible', 'short_repeat', 'short_interval_followup', 'extra_followup'}:
             parents[r['child_id']].append(r)
     state = adult_decision_state(records, decisions)
-    overrides, reopened, events, exceptions = state
+    overrides, _, events, exceptions = state
     pairs, cases = [], []
     def classify(a, b):
         return classify_adult(a, b, policy, state)
@@ -148,37 +206,7 @@ def adult_followups(records, decisions, followup_days=90, policy=None, parent_wa
             cases.append(case)
             if status == "confirmed":
                 matches.append((later, case))
-        # Unchanged explicit reviewer decisions take priority over new automatic
-        # candidates. A direct typo exception does not waive a third profile's
-        # conflict: that extra candidate remains pending rather than cancelling
-        # the reviewed pair or inheriting the exception transitively.
-        reviewed = [(r, c) for r, c in matches if overrides.get(tuple(sorted(
-            [baseline["submission_id"], r["submission_id"]]))) == "LINK_ADULT"]
-        if reviewed:
-            if any(classify(a, b)[0] != "confirmed" for i, (a, _) in enumerate(reviewed)
-                   for b, _ in reviewed[i+1:]):
-                for _, case in matches:
-                    case.update(status="pending", reason="Competing or contradictory reviewed adult profiles")
-                continue
-            automatic = []
-            for r, case in matches:
-                if any(r is anchor for anchor, _ in reviewed):
-                    continue
-                if all(classify(r, anchor)[0] == "confirmed" for anchor, _ in reviewed):
-                    automatic.append((r, case))
-                else:
-                    case.update(status="pending", reason="Automatic adult candidate conflicts with an unchanged reviewed pair")
-            if any(classify(a, b)[0] != "confirmed" for i, (a, _) in enumerate(automatic)
-                   for b, _ in automatic[i+1:]):
-                for _, case in automatic:
-                    case.update(status="pending", reason="Competing automatic adult profiles; unchanged reviewed pair retained")
-                automatic = []
-            matches = reviewed + automatic
-        elif any(classify(a, b)[0] != "confirmed" for i, (a, _) in enumerate(matches)
-                 for b, _ in matches[i+1:]):
-            for _, case in matches:
-                case.update(status="pending", reason="Competing or contradictory adult profiles")
-            continue
+        matches = _consistent_adult_matches(baseline, matches, overrides, classify)
         if matches:
             latest_time = max(timestamp(r["observed_at"]) for r, _ in matches)
             latest = [(r, c) for r, c in matches if timestamp(r["observed_at"]) == latest_time]
