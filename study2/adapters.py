@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from .common import PipelineError, digest, file_hash, phone, plain, text, timestamp, utcnow
+from .grades import parse_grade
 
 
 @lru_cache(maxsize=8)
@@ -298,13 +299,10 @@ def normalize_records(records: list[dict], dictionary: pd.DataFrame) -> tuple[li
         if record["gender"] not in {"0", "1"}:
             record["gender"] = ""
         record["school"] = text(ans.get(primary)) if "school_unmapped" not in record["issues"] else ""
-        grade_raw = text(ans.get(demo + "01"))
+        grade_raw = text(record.get("grade_raw", ans.get(demo + "01")))
         record["grade_raw"] = grade_raw
-        grade_match = re.fullmatch(r"(?:PRIMARY|SECONDARY|FORM|GRADE|CLASS|P|S|F|小|中)?\s*([1-6一二三四五六])(?:\s*[A-Za-z]|年級|年|級|班)?", grade_raw, re.I)
-        grade = None
-        if grade_match:
-            token = grade_match[1]
-            grade = int(token) if token.isdigit() else "一二三四五六".index(token) + 1
+        grade = parse_grade(grade_raw).number
+        record["issues"] = [issue for issue in record["issues"] if issue != "grade_unclear"]
         if grade is None and grade_raw:
             record["issues"].append("grade_unclear")
         ans[demo + "01"] = grade

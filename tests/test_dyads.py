@@ -189,6 +189,34 @@ def test_changed_identity_and_contradictory_candidate_suspend(registry):
     assert plan[0]['registration_state'] == 'suspended'
 
 
+def test_grade_parser_upgrade_preserves_registered_lineage_without_editing_history(tmp_path):
+    db = connect(tmp_path / 'state')
+    dyads.migrate(db)
+    cfg = {'minimum_followup_days': 90}
+    for rid in ('before', 'after'):
+        db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?)', (rid, 'fp', 'now', 'running', '{}', None, None))
+    db.commit()
+    rows = [rec('s0'), rec('p0', role='parent'), rec('s1', 120), rec('p1', 120, role='parent')]
+    for r in rows:
+        r.update(child_id='child', grade=None, grade_raw='F.1',
+                 selected_wave='T0' if r['submission_id'].endswith('0') else 'T1')
+    first = dyads.stage(db, 'before', rows, [], cfg)[0]
+    original = dict(db.execute('SELECT * FROM dyad_registry').fetchone())
+    upgraded = copy.deepcopy(rows)
+    for r in upgraded:
+        r['grade'] = 1
+    second = dyads.stage(db, 'after', upgraded, [], cfg)[0]
+    assert second['dyad_id'] == first['dyad_id'] and second['registration_state'] == 'active'
+    assert dict(db.execute('SELECT * FROM dyad_registry').fetchone()) == original
+    assert dyads.plan(db, 'after', upgraded, [], cfg)[0]['registration_state'] == 'active'
+    # A scientific rollback must not treat the older None as a new identity
+    # conflict just because a later run added the corrected evidence hash.
+    assert dyads.plan(db, 'before', rows, [], cfg)[0]['registration_state'] == 'active'
+    upgraded[0]['dob'] = '2013-03-03'
+    assert dyads.plan(db, 'after', upgraded, [], cfg)[0]['registration_state'] == 'suspended'
+    db.close()
+
+
 def test_excluded_original_anchor_requires_registration_adjudication(registry):
     db,cfg,rows,did,_=registry
     changed=copy.deepcopy(rows)
@@ -657,7 +685,7 @@ def test_publication_backup_failure_keeps_previous_pointer_and_ids(project):
 def test_tracking_restore_keeps_unapproved_reviews(project):
     from study2 import review_core as core
     cfg=t0_only(project);release,rows=invitation(cfg)
-    package=core.create_package(cfg,'Synthetic reviewer',limit=1,kinds=['family'])
+    package=core.create_package(cfg,'Synthetic reviewer',limit=1,kinds=['family'],purpose='validation')
     task=package['tasks'][0]
     core.submit_reviews(cfg,package['package_id'],[{'task_id':task['task_id'],'verdict':'資料不足',
                         'evidence_source':'沒有足夠證據','reason':'Synthetic pending answer'}])

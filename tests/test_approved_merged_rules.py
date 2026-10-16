@@ -11,7 +11,7 @@ from study2.matching import link_records, one_digit_phone, select_waves
 from study2.merged import mark_exact_input_repeats
 from study2.respondents import adult_evidence, adult_followups, adult_match
 from study2.review import export_review, import_review
-from study2.store import connect
+from study2.store import connect, current
 from test_identity_and_time import rec
 from test_pipeline_integration import execute, project
 
@@ -41,16 +41,16 @@ def test_one_digit_is_exactly_one_substitution(a, b, expected):
     assert one_digit_phone(a, b) == expected
 
 
-def test_fuzzy_chain_and_transfer_twins_never_merge_by_row_order():
+def test_fuzzy_chain_stays_pending_and_class_numbers_are_not_identity_gates():
     rows = [rec("a"), rec("b", 120, phone_value="61234568"), rec("c", 240, phone_value="61234588")]
     groups, cases, _ = link_records(rows, [], POLICY)
     assert all(len(g) == 1 for g in groups) and all(c["status"] != "confirmed" for c in cases)
     twins = [rec("s1"), rec("s2"), rec("p", role="parent")]
     twins[0]["answer"]["student_demographics_02"] = "01"
     twins[1]["answer"]["student_demographics_02"] = "02"
-    assert link_records(twins, [], POLICY)[0] == [["p", "s1"], ["s2"]]
+    assert link_records(twins, [], POLICY)[0] == [["p", "s1", "s2"]]
     twins[2]["answer"]["adult_demographics_02"] = ""
-    assert all(len(g) == 1 for g in link_records(twins, [], POLICY)[0])
+    assert link_records(twins, [], POLICY)[0] == [["p", "s1", "s2"]]
 
 
 def test_accepted_batch_dates_establish_90_days_without_claiming_observed_dates():
@@ -60,13 +60,13 @@ def test_accepted_batch_dates_establish_90_days_without_claiming_observed_dates(
     assert all(r["time_confidence"] == "accepted_creation_time" for r in rows)
 
 
-def test_shared_child_phone_and_equal_adult_birth_year_alone_are_insufficient():
+def test_same_adult_birth_year_and_any_exact_contact_ignore_relationship():
     a, b = parent("a", 0), parent("b", 120)
     assert adult_match(a, b)[0] == "confirmed"
     b["answer"]["contact_02"] = ""
-    assert adult_match(a, b) == ("pending", "no_exact_personal_adult_contact")
+    assert adult_match(a, b) == ("confirmed", "same_adult_reported_birth_any_exact_contact")
     b["answer"]["adult_demographics_06"] = 0
-    assert adult_match(a, b) == ("rejected", "reported_relationship_changed")
+    assert adult_match(a, b)[0] == 'confirmed'
     b["answer"]["adult_demographics_06"] = 1
     b["answer"]["adult_demographics_05"] = 1981
     assert adult_match(a, b) == ("rejected", "reported_birth_year_changed")
@@ -80,7 +80,7 @@ def test_adult_replacement_cannot_deduplicate_baseline_caregivers_valid_followup
     pairs, cases, _ = adult_followups(rows, [])
     assert pairs[0]["t0"] == "m0" and pairs[0]["t1"] == "m1"
     assert mother1["bd_selected_wave"] == "T1"
-    assert any(c["rule"] == "reported_relationship_changed" for c in cases)
+    assert any(c["rule"] == "reported_birth_year_changed" for c in cases)
 
 
 def test_adult_manual_evidence_change_reopens_and_blocks_automatic_decision():
@@ -132,7 +132,12 @@ def test_adult_excel_override_is_independent_and_rejects_conflicting_commands(pr
     path = Path(cfg["project_root"]) / "adult-review.xlsx"
     export_review(db, cfg, path, limit=0)
     sheets = pd.read_excel(path, sheet_name=None, dtype=str)
-    case = sheets["cases"].query("kind == 'respondent'").iloc[0].to_dict()
+    # Missing adult years are no longer an ordinary identity-review task. The
+    # operator can still register an explicitly verified pair using NEW.
+    assert sheets["cases"].query("kind == 'respondent'").empty
+    current_case=json.loads(next(row[0] for row in db.execute('SELECT payload_json FROM release_candidates')
+                                 if json.loads(row[0])['kind']=='respondent'))
+    case={**current_case,'case_id':'NEW','release_id':current(db)['release_id']}
     case.update(action="LINK_ADULT", reviewer="Synthetic researcher", reason="Existing synthetic consent log verifies same adult")
     sheets["cases"] = pd.DataFrame([case])
     with pd.ExcelWriter(path) as writer:

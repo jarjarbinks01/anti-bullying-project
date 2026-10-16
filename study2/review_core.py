@@ -14,13 +14,14 @@ from itertools import combinations
 from pathlib import Path
 
 from .common import PipelineError, atomic_json, digest, dumps, secure_directory, text, utcnow, file_hash
-from .matching import hard_conflict, identity_evidence, validate_manual_links
-from .respondents import adult_evidence
+from .matching import hard_conflict, identity_evidence, identity_evidence_matches, validate_manual_links
+from .respondents import adult_evidence, adult_evidence_matches
 from .review import active_decisions, commit_review_rows, release_records, validate_review_rows
 from .store import backup, connect, current, writer_lock
 
 VERDICTS = {"確認相同": "MATCH", "確認不同": "NONMATCH", "資料不足": "UNRESOLVED"}
 EVIDENCE_SOURCES = ["問卷資料比較", "原始紙本", "既有收集紀錄", "其他已核實來源", "沒有足夠證據"]
+VERIFICATION_SOURCES = {'原始紙本', '既有收集紀錄', '其他已核實來源'}
 KINDS = {"identity": "孩子身份", "family": "親子孩子身份", "respondent": "同一成人身份"}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS packages(id TEXT PRIMARY KEY, created_at TEXT, reviewer TEXT, payload TEXT);
@@ -48,6 +49,9 @@ def workspace(cfg):
     db.execute("PRAGMA foreign_keys=ON")
     from .review_storage import prepare_workspace
     prepare_workspace(db,SCHEMA)
+    db.execute('CREATE TABLE IF NOT EXISTS review_evidence_leads('
+               'lead_id TEXT PRIMARY KEY,case_id TEXT NOT NULL,signature TEXT NOT NULL,'
+               'created_at TEXT NOT NULL,payload TEXT NOT NULL)')
     path.chmod(0o600)
     return db
 
@@ -78,15 +82,20 @@ def event(db, kind, target, payload):
 
 def rules_hash(cfg):
     hashes={name:file_hash(Path(__file__).parent/name) for name in
-            ('matching.py','respondents.py','review_core.py','review_hints.py')}
+            ('matching.py','respondents.py','review_core.py','review_hints.py','grades.py','common.py')}
     compatibility=Path(cfg['state_dir'])/'review_rule_compatibility.json'
     if compatibility.exists():
         proof=json.loads(compatibility.read_text())
         if proof.get('format_version')==1 and proof.get('verified') is True and proof.get('current_code')==hashes:
             hashes=proof['original_code']
+    if cfg.get('parent_wave_policy'):
+        hashes = {**hashes, 'parent_waves.py': file_hash(Path(__file__).parent/'parent_waves.py')}
+    config = {k: cfg.get(k) for k in ("matching_policy", "date_policy", "duplicate_days",
+                                    "minimum_followup_days", "bd_requires_same_adult")}
+    if cfg.get('parent_wave_policy'):
+        config['parent_wave_policy'] = cfg['parent_wave_policy']
     return digest({"review_rules": 1, "code": hashes,
-                  "config": {k: cfg.get(k) for k in ("matching_policy", "date_policy", "duplicate_days",
-                            "minimum_followup_days", "bd_requires_same_adult")}})
+                  "config": config})
 
 
 def record_snapshot(record):
@@ -133,14 +142,71 @@ class Context:
         self.main_revision = digest({"decisions": [dict(d) for d in self.decisions],
             "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")]})
         self._component_cache={}
+        from .review_groups import build_groups
+        self.group_cases = build_groups(self.records, self.cases, self.decisions, cfg.get('matching_policy'))
+        self.cases.update(self.group_cases)
+        self._dispatch_baselines = {}
+        self.review_evidence = {}
+        self.expired_review_evidence = []
+        path = Path(cfg['state_dir'])/'review.sqlite'
+        if path.exists():
+            evidence_db = sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)
+            try:
+                exists = evidence_db.execute("SELECT 1 FROM sqlite_master WHERE name='review_evidence_leads'").fetchone()
+                latest = {}
+                if exists:
+                    for cid, signature, payload in evidence_db.execute('SELECT case_id,signature,payload FROM review_evidence_leads ORDER BY created_at,lead_id'):
+                        latest[cid] = (signature,json.loads(payload))
+                for cid,(signature,payload) in latest.items():
+                    if cid in self.cases and self.dispatch_signature(cid) == signature:
+                        self.review_evidence[cid] = payload
+                    else:
+                        self.expired_review_evidence.append(cid)
+            finally:
+                evidence_db.close()
+        from .review_dispatch import Router
+        router = Router(self.records,self.decisions,self.review_evidence)
+        for cid,case in self.group_cases.items():
+            group = case['group_review']
+            route=router.classify(case)['route']
+            if route != group['route'] or cid in self.review_evidence:
+                group['eligibility_route'] = group['route']
+                group['route'] = route
+            if cid in self.review_evidence:
+                group['verification_source'] = self.review_evidence[cid]
+
+    def dispatch_signature(self, case_id):
+        """Evidence-lead validity excludes the lead itself and dispatch overlay."""
+        if case_id not in self._dispatch_baselines:
+            if case_id in self.group_cases:
+                from .review_groups import snapshot
+                case = copy.deepcopy(self.group_cases[case_id])
+                group = case['group_review']
+                group['route'] = group.pop('eligibility_route',group['route'])
+                group.pop('verification_source',None)
+                self._dispatch_baselines[case_id] = snapshot(self,case,record_snapshot)['signature']
+            else:
+                self._dispatch_baselines[case_id] = self._component(case_id)[1]['signature']
+        return self._dispatch_baselines[case_id]
 
     def snapshot(self, case_id):
+        if case_id in self.group_cases:
+            from .review_groups import snapshot
+            case = self.group_cases[case_id]
+            return {'case': copy.deepcopy(case), **snapshot(self, case, record_snapshot)}
         case,component=self._component(case_id)
         # Callers historically receive independent frozen dictionaries.
-        return {'case':case,**copy.deepcopy(component)}
+        result = {'case':case,**copy.deepcopy(component)}
+        if case_id in self.review_evidence:
+            lead = self.review_evidence[case_id]
+            result['verification_source'] = copy.deepcopy(lead)
+            result['signature'] = digest([result['signature'],lead])
+        return result
 
     def signature(self,case_id):
-        return self._component(case_id)[1]['signature']
+        if case_id in self.group_cases:
+            return self.snapshot(case_id)['signature']
+        return self.snapshot(case_id)['signature']
 
     def _component(self,case_id):
         case = self.cases.get(case_id)
@@ -205,11 +271,50 @@ def stratified_cases(cases, reviewer, limit):
     return selected
 
 
+def register_review_evidence(cfg, case_id, source, reference, question, reviewer='Jarvis'):
+    """The designated operator records an available source, never a verdict."""
+    if reviewer != 'Jarvis' or source not in VERIFICATION_SOURCES:
+        raise PipelineError('只可由 Jarvis 登記原始紙本、既有收集紀錄或其他已核實來源')
+    reference,question = text(reference),text(question)
+    if not reference or not question:
+        raise PipelineError('必須填寫實際核實來源的位置及具體要核對的問題')
+    main=connect(Path(cfg['state_dir']),readonly=True)
+    work=workspace(cfg)
+    try:
+        ctx=Context(main,cfg)
+        case=ctx.cases.get(case_id)
+        from .review_dispatch import Router
+        if not case or case.get('status')!='pending' or not Router(ctx.records,ctx.decisions).group_candidate(case):
+            raise PipelineError('個案失效、已有結論或存在身份／人工限制；須先處理更正或裁定')
+        if case['kind'] in {'identity','family'} and case_id not in ctx.group_cases:
+            raise PipelineError('孩子身份來源須登記至完整 GROUP 個案，不能繞過群組限制')
+        signature=ctx.dispatch_signature(case_id)
+        with work:
+            old=work.execute('SELECT payload FROM review_evidence_leads WHERE case_id=? ORDER BY created_at DESC,lead_id DESC LIMIT 1',(case_id,)).fetchone()
+            if old:
+                previous=json.loads(old[0])
+                if all(previous.get(k)==v for k,v in {'source':source,'reference':reference,'question':question,'signature':signature}.items()):
+                    return {**previous,'unchanged':True}
+            lead={'lead_id':'EVID_'+uuid.uuid4().hex,'case_id':case_id,'signature':signature,
+                  'source':source,'reference':reference,'question':question,'reviewer':reviewer,'created_at':utcnow()}
+            work.execute('INSERT INTO review_evidence_leads VALUES(?,?,?,?,?)',
+                         (lead['lead_id'],case_id,signature,lead['created_at'],dumps(lead)))
+            event(work,'verification_source_registered',case_id,lead)
+        return lead
+    finally:
+        main.close();work.close()
+
+
 def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=None,
-                   independent=False, replaces=None):
+                   independent=False, replaces=None, purpose='review'):
     reviewer = text(reviewer)
     if not reviewer or limit < 1:
         raise PipelineError("必須指定審核者及正整數宗數")
+    from .review_dispatch import PURPOSES, REASONS, Router
+    if purpose not in PURPOSES:
+        raise PipelineError('未知審核用途')
+    if purpose == 'adjudication' and reviewer != 'Jarvis':
+        raise PipelineError('裁定工作包只可指派給指定執行者 Jarvis')
     if output and Path(output).exists():
         raise PipelineError("輸出檔案已存在；請使用新檔名，不覆寫原工作包")
     kinds = set(kinds or KINDS)
@@ -219,7 +324,13 @@ def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=No
     work = workspace(cfg)
     try:
         ctx = Context(main, cfg)
-        valid = [c for c in ctx.cases.values() if c["kind"] in kinds and c.get("record_b")]
+        valid = [c for c in ctx.cases.values() if c.get('record_b') and (c['kind'] in kinds or
+                 (c.get('group_review') and 'family' in kinds and
+                  set(c['group_review']['member_roles']) == {'student','parent'}))]
+        router = Router(ctx.records, ctx.decisions,ctx.review_evidence)
+        allowed = {c['case_id']: c for c in valid if router.eligible(c, purpose)
+                   and (purpose != 'review' or c.get('group_review') or c['kind'] == 'respondent')
+                   and (purpose == 'review' or not c.get('group_review'))}
         work.execute("BEGIN IMMEDIATE")
         from .review_storage import task_heads
         for old_task in task_heads(work):
@@ -234,12 +345,39 @@ def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=No
             old = work.execute("SELECT * FROM packages WHERE id=?", (replaces,)).fetchone()
             if not old:
                 raise PipelineError("找不到原工作包")
+            # Reassignment retains the original review/QA purpose and scope.
+            purpose = json.loads(old['payload']).get('purpose', purpose)
+            if purpose == 'adjudication' and reviewer != 'Jarvis':
+                raise PipelineError('裁定工作包只可指派給指定執行者 Jarvis')
+            allowed = {c['case_id']: c for c in valid if router.eligible(c, purpose)
+                       and (purpose != 'review' or c.get('group_review') or c['kind'] == 'respondent')
+                       and (purpose == 'review' or not c.get('group_review'))}
             if work.execute("SELECT 1 FROM reviews WHERE task_id IN (SELECT id FROM tasks WHERE package_id=?)", (replaces,)).fetchone():
                 raise PipelineError("已交回答案的工作包不能重新指派；請另行安排獨立重審")
             case_ids = [r[0] for r in work.execute("SELECT case_id FROM tasks WHERE package_id=?", (replaces,))]
             work.execute("UPDATE tasks SET state='cancelled' WHERE package_id=?", (replaces,))
             event(work, "reassign", replaces, {"reviewer": reviewer})
         assigned = {r[0] for r in work.execute("SELECT case_id FROM tasks WHERE state NOT IN ('cancelled','stale')")}
+        # An unfinished legacy pair task still owns its group. Preserve its
+        # answers and prevent a new helper receiving overlapping work.
+        assigned_members = set()
+        unfinished_pairs = {r[0] for r in work.execute("SELECT case_id FROM tasks WHERE state IN ('assigned','submitted')")}
+        for cid in unfinished_pairs:
+            existing = ctx.cases.get(cid)
+            if (existing and not existing.get('group_review') and existing['kind'] in {'identity','family'}
+                    and router.eligible(existing)):
+                assigned_members.update((existing['record_a'], existing['record_b']))
+        group_assigned = {cid for cid, c in ctx.group_cases.items()
+                          if set(c['group_review']['members']) & assigned_members}
+        assigned |= group_assigned
+        if independent and case_ids:
+            for old_task in work.execute("SELECT reviewer,payload FROM tasks WHERE state NOT IN ('cancelled','stale')"):
+                if old_task['reviewer'] != reviewer:
+                    continue
+                old_case = json.loads(old_task['payload'])['snapshot']['case']
+                old_ids = set(old_case.get('group_review', {}).get('members', [old_case['record_a'], old_case['record_b']]))
+                if any(cid in ctx.group_cases and old_ids & set(ctx.group_cases[cid]['group_review']['members']) for cid in case_ids):
+                    raise PipelineError('獨立重審需由另一位審核者進行；此審核者已獲派相關群組比較')
         if independent and not case_ids:
             raise PipelineError("獨立重審必須明確指定個案")
         if case_ids:
@@ -252,16 +390,24 @@ def create_package(cfg, reviewer, output=None, limit=20, kinds=None, case_ids=No
             if independent and any(work.execute("SELECT 1 FROM tasks WHERE case_id=? AND reviewer=? AND state NOT IN ('cancelled','stale')",
                                                (cid, reviewer)).fetchone() for cid in case_ids):
                 raise PipelineError("獨立重審需由另一位審核者進行")
-            selected = [available[cid] for cid in case_ids[:limit]]
+            blocked = [cid for cid in case_ids if cid not in allowed]
+            if blocked:
+                messages = [cid + '：' + ('孩子比較已改為整組派審，請使用對應 GROUP ID' if
+                            purpose == 'review' and available[cid]['kind'] != 'respondent' and not available[cid].get('group_review')
+                            and router.eligible(available[cid], purpose)
+                            else '、'.join(REASONS[x] for x in router.classify(available[cid])['reasons'])) for cid in blocked]
+                raise PipelineError('以下比較不屬此用途的可派審個案；保留作參考或交指定執行者處理：\n' + '\n'.join(messages))
+            selected = [allowed[cid] for cid in case_ids[:limit]]
         else:
-            selected = stratified_cases([c for c in valid if c['case_id'] not in assigned],reviewer,limit)
+            selected = stratified_cases([c for c in allowed.values() if c['case_id'] not in assigned],reviewer,limit)
         if not selected:
             raise PipelineError("沒有可派發的兩份提交個案")
         pid = "PKG_" + uuid.uuid4().hex
         tasks = []
         package = {"format_version": "study2-review-cards-1", "package_id": pid, "reviewer": reviewer,
                    "created_at": utcnow(), "release_id": ctx.release["release_id"], "tasks": tasks,
-                   "sampling": "kind_status_rule_round_robin" if not case_ids else "explicit_case_ids"}
+                   "sampling": "kind_status_rule_round_robin" if not case_ids else "explicit_case_ids",
+                   'purpose': purpose}
         work.execute("INSERT INTO packages VALUES(?,?,?,?)", (pid, package["created_at"], reviewer, dumps(package)))
         for case in selected:
             tid = "TASK_" + uuid.uuid4().hex
@@ -374,7 +520,7 @@ def latest_reviews(work, include_stale=False):
 
 
 def _adult_conflicts(a, b):
-    return {k for k in ("birth_year", "relationship", "other_relationship")
+    return {k for k in ("birth_year",)
             if a[k] and b[k] and a[k] != b[k]}
 
 
@@ -383,6 +529,8 @@ def _adult_exception(ctx, case, request):
     a, b = (ctx.records[case[k]] for k in ("record_a", "record_b"))
     ea, eb = adult_evidence(a), adult_evidence(b)
     fields = _adult_conflicts(ea, eb)
+    if isinstance(request, dict) and request.get('type') == 'equivalent_relationship_wording':
+        fields = {k for k in ('birth_year','relationship','other_relationship') if ea[k] and eb[k] and ea[k] != eb[k]}
     types = {"accepted_typo_unknown_year": {"birth_year"},
              "equivalent_relationship_wording": {"other_relationship"}}
     if not isinstance(request, dict) or fields != types.get(request.get("type")):
@@ -414,7 +562,10 @@ def _valid_adult_exception(ctx, row):
         expected = _adult_exception(ctx, row, exception)
     except PipelineError:
         return False
-    return expected == exception
+    return (expected.keys() == exception.keys()
+            and all(expected[k] == exception.get(k) for k in expected if k not in {'evidence_a','evidence_b'})
+            and all(adult_evidence_matches(record, exception.get('evidence_' + side), row.get('version_' + side))
+                    for side, record in (('a', a), ('b', b))))
 
 
 def _commands(ctx, task, answer, resolution=None):
@@ -428,12 +579,11 @@ def _commands(ctx, task, answer, resolution=None):
     if label == "MATCH":
         if adult:
             ea, eb = adult_evidence(a), adult_evidence(b)
-            if _adult_conflicts(ea, eb):
-                request = (resolution or {}).get("adult_identity_exception")
-                if request:
-                    exception = _adult_exception(ctx, case, request)
-                else:
-                    raise PipelineError("成人身份資料矛盾；先更正並重新取證，或由 Jarvis 明確裁定可用的逐宗成人身份例外")
+            request = (resolution or {}).get("adult_identity_exception")
+            if request:
+                exception = _adult_exception(ctx, case, request)
+            elif _adult_conflicts(ea, eb):
+                raise PipelineError("成人出生年份矛盾；先更正並重新取證，或由 Jarvis 明確裁定可用的逐宗出生年份例外")
         elif hard_conflict(a, b):
             raise PipelineError("孩子身份資料矛盾；先用既有修正流程更正資料、重跑及重新取證")
         action = "" if case["status"] == "confirmed" else ("LINK_ADULT" if adult else "LINK")
@@ -489,21 +639,26 @@ def preview_batch(cfg, package_ids=None, adjudications=None):
                     if not chosen:
                         raise PipelineError("裁定必須採納現有審核結果")
                 row, task, answer = chosen
-                command = _commands(ctx, task, answer, resolution)
-                old_label = current_labels.get(cid)
-                prefix = "adult_pair:" if command["kind"] == "respondent" else "pair:"
-                target = prefix + digest(sorted([command["record_a"], command["record_b"]]))
-                old = next((d for d in ctx.decisions if d["payload"]["target_key"] == target), None)
-                opposite = (old and command["action"] and old["payload"]["action"] != command["action"]) or (
-                    old_label and old_label["label"] in {"MATCH", "NONMATCH"} and answer["label"] in {"MATCH", "NONMATCH"}
-                    and old_label["label"] != answer["label"])
-                if opposite and not resolution:
-                    raise PipelineError("與既有人工決定相反，需要 Jarvis 裁定")
-                command["review_ids"] = [r["id"] for r, _, _ in reviews]
-                if resolution:
-                    command["adjudication"] = {**resolution, "adjudicator": "Jarvis", "replaced_label": old_label,
-                                               "replaced_decision": old, "alternatives": [dict(r) for r, _, _ in reviews]}
-                rows.append(command)
+                if task['snapshot']['case'].get('group_review'):
+                    from .review_groups import commands
+                    proposed = commands(ctx, task, answer, resolution, _commands)
+                else:
+                    proposed = [_commands(ctx, task, answer, resolution)]
+                for command in proposed:
+                    old_label = current_labels.get(command['case_id'])
+                    prefix = "adult_pair:" if command["kind"] == "respondent" else "pair:"
+                    target = prefix + digest(sorted([command["record_a"], command["record_b"]]))
+                    old = next((d for d in ctx.decisions if d["payload"]["target_key"] == target), None)
+                    opposite = (old and command["action"] and old["payload"]["action"] != command["action"]) or (
+                        old_label and old_label["label"] in {"MATCH", "NONMATCH"} and command['label'] in {"MATCH", "NONMATCH"}
+                        and old_label["label"] != command['label'])
+                    if opposite and not resolution:
+                        raise PipelineError("與既有人工決定相反，需要 Jarvis 裁定")
+                    command["review_ids"] = [r["id"] for r, _, _ in reviews]
+                    if resolution:
+                        command["adjudication"] = {**resolution, "adjudicator": "Jarvis", "replaced_label": old_label,
+                                                   "replaced_decision": old, "alternatives": [dict(r) for r, _, _ in reviews]}
+                rows.extend(proposed)
                 if answer["label"] == "UNRESOLVED":
                     unresolved.append(cid)
             except PipelineError as error:
@@ -579,8 +734,11 @@ def _check_group_conflicts(ctx, rows):
             if p['action']!=action or not {p['record_a'],p['record_b']}<=ctx.records.keys():
                 continue
             if p.get('evidence_a') is not None:
-                evidence=adult_evidence if adult else identity_evidence
-                if any(evidence(ctx.records[p['record_'+s]])!=p.get('evidence_'+s) for s in ('a','b')):
+                def unchanged(side):
+                    record = ctx.records[p['record_' + side]]
+                    saved = p.get('evidence_' + side)
+                    return adult_evidence_matches(record, saved, p.get('version_' + side)) if adult else identity_evidence_matches(record, saved)
+                if not all(unchanged(s) for s in ('a','b')):
                     continue
             adjacency[p['record_a']].add(p['record_b'])
             adjacency[p['record_b']].add(p['record_a'])
@@ -758,6 +916,8 @@ def review_report(cfg):
         try:
             release=current(main)
             stats=json.loads(release['stats_json'])
+            from .review_dispatch import summary as dispatch_summary
+            dispatch = dispatch_summary(Context(main, cfg), work)
             candidates={r[0] for r in main.execute("SELECT case_id FROM release_candidates WHERE release_id=? "
                         "AND json_extract(payload_json,'$.kind') IN ('identity','family','respondent') "
                         "AND json_extract(payload_json,'$.record_b')<>''",(release['release_id'],))}
@@ -766,6 +926,7 @@ def review_report(cfg):
         reviewed=reviewed_active&candidates
         assigned={r[0] for r in work.execute("SELECT DISTINCT case_id FROM tasks WHERE state NOT IN ('cancelled','stale')")}&candidates
         return {"original_algorithm_by_rule": dict(rules), "independent_review": dict(independent),
+                'identity_review_queue': dispatch,
                 "published_results": {'release_id':release['release_id'],'published_at':release['created_at'],
                     'samples':{k:stats.get(k) for k in ('A','B','C','D','AC','BD','E','F','EF')},
                     'validation_cases_labelled':stats.get('validation_cases_labelled',0)},
@@ -783,6 +944,7 @@ def review_report(cfg):
 
 from .checkpoints import protect_mutation
 create_package=protect_mutation(create_package)
+register_review_evidence=protect_mutation(register_review_evidence)
 submit_reviews=protect_mutation(submit_reviews)
 preview_batch=protect_mutation(preview_batch)
 approve_batch=protect_mutation(approve_batch)

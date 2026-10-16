@@ -24,13 +24,13 @@ def test_shared_family_phone_does_not_merge_siblings():
     assert any(c["status"] == "pending" for c in cases)
 
 
-def test_twin_class_conflict_makes_whole_component_pending():
+def test_class_number_difference_does_not_veto_child_identity():
     rows = [rec("s1"), rec("s2"), rec("p", role="parent")]
     rows[0]["answer"]["student_demographics_02"] = "3A-01"
     rows[1]["answer"]["student_demographics_02"] = "3A-02"
     groups, cases, _ = link_records(rows, [])
-    assert all(len(g) == 1 for g in groups)
-    assert all(c["status"] != "confirmed" for c in cases)
+    assert groups == [["p", "s1", "s2"]]
+    assert all(c["status"] == "confirmed" for c in cases)
 
 
 def test_fuzzy_phone_and_missing_measurements_are_review_only():
@@ -114,14 +114,14 @@ def test_chain_never_moves_earliest_t0():
     assert rows[2]["status"] == rows[3]["status"] == "short_interval_followup"
 
 
-def test_indistinguishable_twins_without_class_number_are_pending():
+def test_missing_class_number_does_not_veto_child_identity():
     rows = [rec("s1"), rec("s2"), rec("p", role="parent")]
     for r in rows:
         r["answer"]["student_demographics_02"] = None
         r["answer"]["adult_demographics_02"] = None
     groups, cases, _ = link_records(rows, [])
-    assert len(groups) == 3
-    assert all(c["status"] == "pending" for c in cases)
+    assert groups == [["p", "s1", "s2"]]
+    assert all(c["status"] == "confirmed" for c in cases)
 
 
 def test_conflicting_manual_triangle_is_rejected():

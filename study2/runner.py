@@ -32,7 +32,7 @@ def fingerprint(cfg, manifest, db):
                    "dictionary": file_hash(Path(cfg["state_dir"]) / "school_dictionary.xlsx"),
                    "decisions": [d["payload"] for d in active_decisions(db)],
                    "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")],
-                   "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy")],
+                   "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy"), cfg.get("parent_wave_policy")],
                    "source_folder": cfg.get("source_folder", "1.1_raw_file"), "source_registry": cfg["sources"],
                    "legacy_sources": {str(p.relative_to(cfg["project_root"])):file_hash(p) for p in legacy_files(cfg)},
                    "permanent_registration": administrative_fingerprint(db)})
@@ -104,13 +104,13 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             with db:
                 ingest(db, run_id, records)
                 children = assign_children(db, run_id, groups)
-                records, time_cases = select_waves(records, children, cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("bd_requires_same_adult", False), cfg.get("matching_policy", {}))
+                records, time_cases = select_waves(records, children, cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("bd_requires_same_adult", False), cfg.get("matching_policy", {}), adult_decisions=decisions, parent_wave_policy=cfg.get("parent_wave_policy"))
                 check_unexpected_backfill(db, records)
                 cases += time_cases
                 adult_pairs = None
                 if cfg.get("bd_requires_same_adult"):
                     from .respondents import adult_followups
-                    adult_pairs, adult_cases, adult_events = adult_followups(records, decisions, cfg["minimum_followup_days"], cfg.get("matching_policy", {}))
+                    adult_pairs, adult_cases, adult_events = adult_followups(records, decisions, cfg["minimum_followup_days"], cfg.get("matching_policy", {}), parent_wave_policy=cfg.get("parent_wave_policy"))
                     cases += adult_cases
                     events += adult_events
                 from collections import defaultdict
@@ -120,6 +120,9 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                         for sid in [case["record_a"], case["record_b"]]:
                             if sid:
                                 rules_by_id[sid].add(case["rule"])
+                    if case["status"] == "confirmed" and case["kind"] == "identity_group":
+                        for sid in case["component_evidence"]["members"]:
+                            rules_by_id[sid].add(case["rule"])
                 for r in records:
                     r["identity_rules"] = sorted(rules_by_id[r["submission_id"]])
                     store_record(db, run_id, r["submission_id"], {k: v for k, v in r.items() if k != "contacts"})
@@ -149,6 +152,7 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             summary["batch_creation_time_submissions"] = sum(r.get("date_basis") == "batch_assigned_creation" for r in records)
             summary["matching_policy"] = cfg.get("matching_policy", {})
             summary["date_policy"] = cfg.get("date_policy", "observed_dates_only")
+            summary["parent_wave_policy"] = cfg.get("parent_wave_policy")
             summary["bd_requires_same_adult"] = cfg.get("bd_requires_same_adult", False)
             summary["t0_inferred_from_T1"] = sum(r["selected_wave"] == "T0" and r["claimed_wave"] == "T1" for r in records)
             summary["validation_cases_labelled"] = sum(r["reviewed"] for r in labels)

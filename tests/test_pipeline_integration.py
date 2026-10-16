@@ -112,10 +112,27 @@ def test_caregiver_change_keeps_child_tracking_but_flags_ef(project):
     assert result['E'] == result['F'] == result['EF'] == 1
     folder = Path(cfg['release_dir']) / result['release_id']
     pairs = pd.read_excel(folder / '3.1.3_manual_pairing/EF_T0T1-student&parent-paired_final.xlsx', sheet_name='paired')
-    assert pairs.iloc[0]['caregiver_status'] == 'reported_relationship_changed'
+    assert pairs.iloc[0]['caregiver_status'] == 'identity_unconfirmed'
+    assert bool(pairs.iloc[0]['reported_relationship_changed'])
     db = connect(Path(cfg['state_dir']))
     assert db.execute('SELECT COUNT(DISTINCT child_id) FROM identity_members WHERE run_id=?', (result['release_id'],)).fetchone()[0] == 1
     db.close()
+
+
+def test_any_contact_policy_reaches_bd_ef_and_published_summary(project):
+    cfg, _, rows, _ = project
+    cfg['bd_requires_same_adult'] = True
+    cfg['matching_policy'] = {'adult_contact_scope': 'any_exact'}
+    for row, relation, personal in [(rows[2], 0, '62345678'), (rows[3], 1, '63456789')]:
+        row['answer'].update(adult_demographics_05=1980, adult_demographics_06=relation,
+                             contact_01='61234567;shared@example.org', contact_02=personal)
+    result = execute(project)
+    assert result['BD'] == result['E'] == result['F'] == result['EF'] == 1
+    assert result['BD_any_exact_contact'] == 1
+    folder = Path(cfg['release_dir']) / result['release_id']
+    pairs = pd.read_excel(folder / '3.1.3_manual_pairing/EF_T0T1-student&parent-paired_final.xlsx', sheet_name='paired')
+    assert pairs.iloc[0]['caregiver_status'] == 'same_adult_by_accepted_evidence'
+    assert bool(pairs.iloc[0]['reported_relationship_changed'])
 
 
 def test_card_review_approve_apply_republish_and_workspace_backup(project):
@@ -123,7 +140,7 @@ def test_card_review_approve_apply_republish_and_workspace_backup(project):
     from study2.runner import publish_release
     first=execute(project)
     cfg,_,_,_=project
-    package=core.create_package(cfg,'Synthetic reviewer',limit=20,kinds=['family'])
+    package=core.create_package(cfg,'Synthetic reviewer',limit=20,kinds=['family'],purpose='validation')
     task=package['tasks'][0]
     core.submit_reviews(cfg,package['package_id'],[{'task_id':task['task_id'],'verdict':'確認不同',
                         'evidence_source':'既有收集紀錄','reason':'已核實合成案例指向不同孩子'}])

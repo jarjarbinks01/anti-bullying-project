@@ -38,7 +38,7 @@ def write_preview(batch, path):
     return str(path.resolve())
 
 
-def resolve(cfg,batch_id,case_id,review_id,reason,adult_identity_exception=None):
+def resolve(cfg,batch_id,case_id,review_id,reason,adult_identity_exception=None,group_partition=None):
     work=core.workspace(cfg)
     try:
         row=work.execute('SELECT payload FROM batches WHERE id=?',(batch_id,)).fetchone()
@@ -49,6 +49,8 @@ def resolve(cfg,batch_id,case_id,review_id,reason,adult_identity_exception=None)
         resolutions[case_id]={'review_id':review_id,'reason':reason}
         if adult_identity_exception:
             resolutions[case_id]['adult_identity_exception']=adult_identity_exception
+        if group_partition is not None:
+            resolutions[case_id]['group_partition']=group_partition
     finally:
         work.close()
     return core.preview_batch(cfg,batch['package_ids'],resolutions)
@@ -82,7 +84,7 @@ def choose_batch(cfg,states):
 
 def console(cfg):
     folder=Path(__file__).parent.parent/'review_packages'
-    print('Study 2｜審核操作（指定執行者）\n1 匯出審核卡\n2 收回審核包\n3 預覽答案\n4 Jarvis 批准\n5 套用已批准決定\n6 查看核實報告\n7 裁定同事分歧／相反人工決定\n0 離開')
+    print('Study 2｜審核操作（指定執行者）\n1 匯出審核卡\n2 收回審核包\n3 預覽答案\n4 Jarvis 批准\n5 套用已批准決定\n6 查看核實報告\n7 裁定同事分歧／相反人工決定\n8 登記可核實來源及問題\n0 離開')
     option=input('選擇操作：').strip()
     if option=='1':
         reviewer=text(input('審核者姓名／代號：'))
@@ -113,6 +115,12 @@ def console(cfg):
         return core.apply_batch(cfg,choose_batch(cfg,{'approved','applied'}))
     if option=='6':
         return core.review_report(cfg)
+    if option=='8':
+        cid=text(input('個案 ID（孩子使用 GROUP ID）：'))
+        source=text(input('來源類別（原始紙本／既有收集紀錄／其他已核實來源）：'))
+        reference=text(input('實際可查閱的來源位置：'))
+        question=text(input('需要同事核對的具體問題：'))
+        return core.register_review_evidence(cfg,cid,source,reference,question)
     if option=='7':
         bid=choose_batch(cfg,{'previewed'})
         result=resolve(cfg,bid,input('例外個案 ID（預覽頁內）：').strip(),input('採納的審核結果 ID（預覽頁內）：').strip(),input('Jarvis 裁定理由：'))

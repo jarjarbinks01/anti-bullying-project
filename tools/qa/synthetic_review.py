@@ -36,5 +36,5 @@ for r in rows:
     r['location']={'file':'synthetic_survey.xlsx','row':2,'sheet':0}
     db.execute('UPDATE normalized_records SET payload_json=? WHERE submission_id=?',(dumps(r),r['submission_id']))
 db.commit();db.close()
-package=create_package(cfg,'合成測試審核者',state/'synthetic_cards.xlsx',case_ids=ids)
+package=create_package(cfg,'合成測試審核者',state/'synthetic_cards.xlsx',case_ids=ids,purpose='validation')
 print(json.dumps({'path':str(state/'synthetic_cards.xlsx'),'package_id':package['package_id']},ensure_ascii=False))

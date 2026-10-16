@@ -6,29 +6,49 @@ from .common import PipelineError, contacts, digest, phone, text, timestamp
 from .matching import candidate, validate_manual_links
 
 
-def adult_evidence(r):
+def _adult_evidence(r, *, legacy=False):
     answer = r.get("answer", {})
-    own = set()
-    number = phone(answer.get("contact_02"))
-    if number:
-        own.add(number)
+    if legacy:
+        number = phone(answer.get("contact_02"))
+        own = {number} if number else set()
+    else:
+        own = contacts({"contact_02": answer.get("contact_02")}, extended_separators=True)
     # Email field meaning is documented for these versions. Other old-system
     # contact extensions are not silently assumed to identify the respondent.
     label = r.get("source_label", text(answer.get("Survey")))
     if "qualtrics" in label or label.startswith(("paperform", "socialworkdream")):
-        own.update(x for x in contacts({"contact_03.1": answer.get("contact_03.1")}) if "@" in x)
-    return {"birth_year": text(answer.get("adult_demographics_05")),
+        own.update(x for x in contacts({"contact_03.1": answer.get("contact_03.1")}, extended_separators=not legacy) if "@" in x)
+    evidence = {"birth_year": text(answer.get("adult_demographics_05")),
             "relationship": text(answer.get("adult_demographics_06")),
             "other_relationship": text(answer.get("adult_demographics_06.1")).lower(),
             "personal_contacts": sorted(own)}
+    if not legacy:
+        evidence['all_contacts'] = sorted(contacts(answer, extended_separators=True))
+    return evidence
+
+
+def adult_evidence(r):
+    return _adult_evidence(r)
+
+
+def adult_evidence_matches(r, saved, saved_version=None):
+    if adult_evidence(r) == saved:
+        return True
+    # The former snapshot omitted general contacts and could not parse a list
+    # in contact_02. Carry it only for the exact original source version and
+    # an exactly reproducible old snapshot; never rewrite the original decision.
+    return bool(isinstance(saved, dict) and 'all_contacts' not in saved and saved_version
+                and r.get('version_id') == saved_version and _adult_evidence(r, legacy=True) == saved)
 
 
 def adult_match(a, b, policy=None):
+    if (policy or {}).get('adult_contact_scope', 'any_exact') != 'any_exact':
+        raise PipelineError('Unsupported adult contact scope; current research policy is any_exact')
     ea, eb = adult_evidence(a), adult_evidence(b)
     if a["role"] != "parent" or b["role"] != "parent":
         return "rejected", "not_two_parent_responses"
-    if ea["relationship"] in {"0", "1", "2"} and eb["relationship"] in {"0", "1", "2"} and ea["relationship"] != eb["relationship"]:
-        return "rejected", "reported_relationship_changed"
+    if a.get('child_id') and b.get('child_id') and a['child_id'] != b['child_id']:
+        return 'rejected', 'different_child_identity'
     years = [e["birth_year"] for e in [ea, eb]]
     from .common import utcnow
     maximum = min((timestamp(r.get("observed_at")) or timestamp(utcnow())).year for r in [a, b])
@@ -36,42 +56,17 @@ def adult_match(a, b, policy=None):
         return "pending", "adult_birth_year_missing_or_invalid"
     if ea["birth_year"] != eb["birth_year"]:
         return "rejected", "reported_birth_year_changed"
-    if ea["relationship"] not in {"0", "1", "2"} or eb["relationship"] not in {"0", "1", "2"}:
-        return "pending", "adult_relationship_missing_or_invalid"
-    if ea["relationship"] != eb["relationship"]:
-        return "rejected", "reported_relationship_changed"
-    if ea["relationship"] == "2":
-        if not ea["other_relationship"] or not eb["other_relationship"]:
-            return "pending", "adult_other_relationship_unspecified"
-        if ea["other_relationship"] != eb["other_relationship"]:
-            return "rejected", "reported_other_relationship_changed"
     if set(ea["personal_contacts"]) & set(eb["personal_contacts"]):
-        return "confirmed", "same_adult_reported_birth_relationship_personal_contact"
-    # Research-approved fallback: at least one response has no usable personal
-    # contact. Different, present personal contacts are not treated as omission.
-    if ((policy or {}).get("allow_exact_general_contact_when_personal_missing") and
-            (not ea["personal_contacts"] or not eb["personal_contacts"]) and
-            contacts(a["answer"]) & contacts(b["answer"])):
-        return "confirmed", "same_adult_reported_birth_relationship_general_contact_fallback"
-    return "pending", "no_exact_personal_adult_contact"
+        return "confirmed", "same_adult_reported_birth_personal_contact"
+    if set(ea['all_contacts']) & set(eb['all_contacts']):
+        return 'confirmed', 'same_adult_reported_birth_any_exact_contact'
+    return "pending", "no_exact_adult_contact"
 
 
-def adult_followups(records, decisions, followup_days=90, policy=None):
-    """Baseline caregiver's latest eligible followup, independent of family F.
-
-    This retains a mother's eligible followup even when a later father response
-    is selected for the child's family-wave view. BD never uses the child's
-    shared phone alone as evidence of the adult's identity. A policy-approved
-    exact general contact may support matching when personal contact is missing,
-    provided the child's identity and the other adult checks already agree.
-    """
+def adult_decision_state(records, decisions):
+    """One validation path for manual adult decisions in repeats and BD."""
     by_id = {r["submission_id"]: r for r in records}
-    parents = defaultdict(list)
-    for r in records:
-        if r["role"] == "parent" and r.get("child_id") and r["status"] in {
-                "eligible", "short_repeat", "short_interval_followup", "extra_followup"}:
-            parents[r["child_id"]].append(r)
-    overrides, reopened, events, pairs, cases = {}, set(), [], [], []
+    overrides, reopened, events = {}, set(), []
     exceptions = {}
     for d in decisions:
         p = d["payload"]
@@ -79,7 +74,7 @@ def adult_followups(records, decisions, followup_days=90, policy=None):
             continue
         ids = [p["record_a"], p["record_b"]]
         valid = all(i in by_id and by_id[i]["role"] == "parent" and
-                    adult_evidence(by_id[i]) == p.get("evidence_" + suffix)
+                    adult_evidence_matches(by_id[i], p.get("evidence_" + suffix), p.get('version_' + suffix))
                     for suffix, i in zip(["a", "b"], ids))
         valid &= all(i in by_id and by_id[i].get("child_id") for i in ids)
         if valid:
@@ -101,14 +96,38 @@ def adult_followups(records, decisions, followup_days=90, policy=None):
             reopened.update(ids)
     validate_manual_links([p for p, v in overrides.items() if v == "LINK_ADULT"],
                           [p for p, v in overrides.items() if v == "UNLINK_ADULT"])
+    return overrides, reopened, events, exceptions
 
+
+def classify_adult(a, b, policy=None, state=None):
+    overrides, reopened = state[:2] if state is not None else ({}, set())
+    key = tuple(sorted([a['submission_id'], b['submission_id']]))
+    if key in overrides:
+        return ('confirmed', 'reviewer_confirmed_same_adult') if overrides[key] == 'LINK_ADULT' else ('rejected', 'reviewer_rejected_same_adult')
+    if reopened & set(key):
+        return 'pending', 'adult_decision_reopened'
+    return adult_match(a, b, policy)
+
+
+def adult_followups(records, decisions, followup_days=90, policy=None, parent_wave_policy=None):
+    """Same-child, same-birth-year, any-exact-contact adult followups.
+
+    Relationship is retained as reported metadata, never a confirmation gate.
+    Direct manual decisions and bounded birth-year exceptions retain priority.
+    """
+    from .parent_waves import validate_policy
+    validate_policy(parent_wave_policy)
+    by_id = {r['submission_id']: r for r in records}
+    parents = defaultdict(list)
+    for r in records:
+        if r['role'] == 'parent' and r.get('child_id') and r['status'] in {
+                'eligible', 'short_repeat', 'short_interval_followup', 'extra_followup'}:
+            parents[r['child_id']].append(r)
+    state = adult_decision_state(records, decisions)
+    overrides, reopened, events, exceptions = state
+    pairs, cases = [], []
     def classify(a, b):
-        key = tuple(sorted([a["submission_id"], b["submission_id"]]))
-        if key in overrides:
-            return ("confirmed", "reviewer_confirmed_same_adult") if overrides[key] == "LINK_ADULT" else ("rejected", "reviewer_rejected_same_adult")
-        if reopened & set(key):
-            return "pending", "adult_decision_reopened"
-        return adult_match(a, b, policy)
+        return classify_adult(a, b, policy, state)
 
     for child, group in sorted(parents.items()):
         baseline = next((r for r in group if r.get("selected_wave") == "T0"), None)
@@ -118,11 +137,14 @@ def adult_followups(records, decisions, followup_days=90, policy=None):
         for later in group:
             if later is baseline or not timestamp(later.get("observed_at")):
                 continue
-            if timestamp(later["observed_at"]) - timestamp(baseline["observed_at"]) < timedelta(days=followup_days):
+            if parent_wave_policy:
+                if later.get('parent_phase') != 'T1' or later.get('wave_reason') == 'pending_chronology':
+                    continue
+            elif timestamp(later["observed_at"]) - timestamp(baseline["observed_at"]) < timedelta(days=followup_days):
                 continue
             status, rule = classify(baseline, later)
             case = candidate(baseline, later, "respondent", rule, status,
-                             "Same child; adult continuity requires adult birth year, relationship and approved contact evidence")
+                             "Same child; adult continuity requires a valid equal birth year and at least one exact phone/email across all contact fields")
             cases.append(case)
             if status == "confirmed":
                 matches.append((later, case))

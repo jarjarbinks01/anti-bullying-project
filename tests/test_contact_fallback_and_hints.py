@@ -8,7 +8,7 @@ from study2.review_hints import pair_review_hints
 from test_approved_merged_rules import parent
 from test_identity_and_time import rec
 
-FALLBACK = {"allow_exact_general_contact_when_personal_missing": True}
+FALLBACK = {"adult_contact_scope": "any_exact"}
 
 
 @pytest.mark.parametrize("missing", ["a", "b", "both"])
@@ -17,9 +17,9 @@ def test_exact_general_phone_can_replace_missing_personal_contact(missing):
     for label, record in [("a", a), ("b", b)]:
         if missing in {label, "both"}:
             record["answer"]["contact_02"] = ""
-    assert adult_match(a, b)[0] == "pending"
+    assert adult_match(a, b)[0] == "confirmed"
     assert adult_match(a, b, FALLBACK) == (
-        "confirmed", "same_adult_reported_birth_relationship_general_contact_fallback")
+        "confirmed", "same_adult_reported_birth_any_exact_contact")
 
 
 def test_email_fallback_is_exact_and_does_not_overrule_adult_conflicts():
@@ -37,12 +37,12 @@ def test_email_fallback_is_exact_and_does_not_overrule_adult_conflicts():
     b["answer"]["adult_demographics_05"] = ""
     assert adult_match(a, b, FALLBACK)[1] == "adult_birth_year_missing_or_invalid"
     b["answer"].update(adult_demographics_05=1980, adult_demographics_06=0)
-    assert adult_match(a, b, FALLBACK)[1] == "reported_relationship_changed"
+    assert adult_match(a, b, FALLBACK)[0] == 'confirmed'
 
 
-def test_different_present_personal_contacts_do_not_trigger_fallback():
+def test_different_personal_contacts_allow_an_exact_shared_general_contact():
     a, b = parent("a", 0), parent("b", 120, personal="63456789")
-    assert adult_match(a, b, FALLBACK)[0] == "pending"
+    assert adult_match(a, b, FALLBACK) == ('confirmed', 'same_adult_reported_birth_any_exact_contact')
 
 
 def test_fallback_drives_repeat_selection_and_never_links_different_children():

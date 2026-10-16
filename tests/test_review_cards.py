@@ -34,9 +34,9 @@ def project(tmp_path):
     return cfg,[c['case_id'],family['case_id'],adult['case_id']]
 
 
-def package(project,reviewer='A',ids=None,path=None,independent=False):
+def package(project,reviewer='A',ids=None,path=None,independent=False,purpose='validation'):
     cfg,cases=project
-    return core.create_package(cfg,reviewer,path,case_ids=ids or cases,independent=independent)
+    return core.create_package(cfg,reviewer,path,case_ids=ids or cases,independent=independent,purpose=purpose)
 
 
 def answers(pkg,verdict='確認相同',reason='已核對合成收集紀錄第 2 行'):
@@ -384,10 +384,8 @@ def test_adult_requires_confirmed_child_and_consistent_demographics(project):
     row['answer']['adult_demographics_05']='1981'
     db.execute("UPDATE normalized_records SET payload_json=? WHERE submission_id='q'",(dumps(row),))
     db.commit();db.close()
-    pkg=package(project,ids=[cases[2]])
-    submit(cfg,pkg)
-    batch=core.preview_batch(cfg)
-    assert not batch['rows'] and '成人身份資料矛盾' in batch['conflicts'][0]['message']
+    with pytest.raises(PipelineError,match='有效成人出生年份不同'):
+        package(project,ids=[cases[2]])
 
 
 def test_manual_opposite_requires_adjudication(project):
@@ -481,7 +479,7 @@ def test_transitive_unlink_conflicts_isolated_from_adult_case(project):
 def test_new_candidate_reopens_old_task_on_next_export(project):
     cfg,cases=project
     p=package(project,ids=[cases[0]])
-    new_release(cfg,{'dob':'2011-01-01'})
+    new_release(cfg,{'school':'Another School'})
     replacement=package(project,ids=[cases[0]])
     assert replacement['tasks'][0]['task_id']!=p['tasks'][0]['task_id']
     db=core.workspace(cfg)
@@ -499,7 +497,7 @@ def adult_difference(project, field='adult_demographics_05', values=('1980','198
             row['answer']['adult_demographics_06']='2'
         db.execute('UPDATE normalized_records SET payload_json=? WHERE submission_id=?',(dumps(row),sid))
     db.commit();db.close()
-    p=package(project,ids=[cases[2]])
+    p=package(project,reviewer='Jarvis',ids=[cases[2]],purpose='adjudication')
     submit(cfg,p)
     work=core.workspace(cfg)
     rid=core.latest_reviews(work)[0]['id'];work.close()
@@ -517,7 +515,7 @@ def adult_resolution(rid,kind='accepted_typo_unknown_year'):
     ('adult_demographics_06.1',('姑侄','姑姐'),'equivalent_relationship_wording')])
 def test_operator_adult_exception_retains_evidence(project,field,values,kind):
     cfg,p,cid,rid=adult_difference(project,field,values)
-    assert len(core.preview_batch(cfg,[p['package_id']])['conflicts'])==1
+    assert len(core.preview_batch(cfg,[p['package_id']])['conflicts']) == (1 if kind == 'accepted_typo_unknown_year' else 0)
     preview=core.preview_batch(cfg,[p['package_id']],{cid:adult_resolution(rid,kind)})
     assert not preview['conflicts'] and len(preview['rows'])==1
     core.approve_batch(cfg,preview['batch_id'],reason='只批准這宗已裁定的身份例外')
@@ -533,10 +531,19 @@ def test_operator_adult_exception_retains_evidence(project,field,values,kind):
     db.close()
 
 
-def test_adult_exception_cannot_waive_changed_parent_relationship(project):
+def test_unnecessary_birth_year_exception_is_rejected(project):
     cfg,p,cid,rid=adult_difference(project,'adult_demographics_06',('0','1'))
     preview=core.preview_batch(cfg,[p['package_id']],{cid:adult_resolution(rid)})
     assert not preview['rows'] and len(preview['conflicts'])==1
+
+
+def test_review_can_confirm_different_relationships_without_exception(project):
+    cfg, p, cid, rid = adult_difference(project, 'adult_demographics_06', ('0', '1'))
+    preview = core.preview_batch(cfg, [p['package_id']])
+    assert not preview['conflicts'] and preview['rows'][0]['action'] == 'LINK_ADULT'
+    assert 'adult_identity_exception' not in preview['rows'][0]
+    core.approve_batch(cfg, preview['batch_id'], reason='關係只作參考；已核實同一孩子及成人')
+    assert core.apply_batch(cfg, preview['batch_id'])['corrections'] == 1
 
 
 def test_exception_does_not_waive_transitive_adult_conflict(project):

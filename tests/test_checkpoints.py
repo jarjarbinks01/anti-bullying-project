@@ -30,7 +30,7 @@ def test_latest_only_checkpoint_restores_pending_reviews_and_prunes_after_verifi
     cfg,_,_,_=project;cfg['checkpoint_policy']={'latest_complete_only':True}
     result=execute(project);first=latest(cfg)
     assert not (Path(cfg['release_dir'])/result['release_id']/'backup.sqlite').exists()
-    pkg=review_core.create_package(cfg,'synthetic-reviewer',limit=1)
+    pkg=review_core.create_package(cfg,'synthetic-reviewer',limit=1,purpose='validation')
     review_core.submit_reviews(cfg,pkg['package_id'],[{'task_id':pkg['tasks'][0]['task_id'],
         'verdict':'資料不足','evidence_source':'沒有足夠證據','reason':'合成待核實個案'}])
     second=latest(cfg)
@@ -128,7 +128,7 @@ def test_review_only_checkpoint_reuses_main_archive(project):
     from study2 import review_core
     cfg,_,_,_=project;execute(project);first=latest(cfg)
     original=Path(first['path'])/'study2.sqlite.gz';inode=original.stat().st_ino
-    review_core.create_package(cfg,'synthetic-reviewer',limit=1)
+    review_core.create_package(cfg,'synthetic-reviewer',limit=1,purpose='validation')
     new=Path(latest(cfg)['path'])/'study2.sqlite.gz'
     assert new.stat().st_ino==inode
 

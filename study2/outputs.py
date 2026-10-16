@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from .common import contacts, dumps, plain, text, timestamp
+from .parent_waves import FIELDS as PARENT_WAVE_FIELDS
 
 
 def source_category(label):
@@ -123,7 +124,8 @@ def export_row(record: dict) -> dict:
             "adult_birth_year_status": record.get("adult_birth_year_status", ""),
             "adult_identity_exception_type": (record.get("adult_identity_exception") or {}).get("type", ""),
             "observed_at": record["observed_at"], "time_confidence": record["time_confidence"],
-            "date_basis": record.get("date_basis"), "identity_rules": ";".join(record.get("identity_rules", []))}
+            "date_basis": record.get("date_basis"), "identity_rules": ";".join(record.get("identity_rules", [])),
+            **{k: record.get(k) for k in PARENT_WAVE_FIELDS}}
 
 
 def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_queue: list[dict], schemas: dict,
@@ -148,13 +150,38 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                "case_rule_counts": dict(Counter(c["rule"] for c in cases)),
                "school_names_pending": len(school_queue), "time_confidence_counts": dict(Counter(r["time_confidence"] for r in records))}
     summary["review_warning_cases"] = sum(bool(c.get("review_warnings")) for c in cases)
+    auto_groups = [c for c in cases if c["kind"] == "identity_group" and c["status"] == "confirmed"]
+    summary["auto_contact_bridge_groups"] = len(auto_groups)
+    summary["auto_contact_bridge_submissions"] = len({sid for c in auto_groups for sid in c["component_evidence"]["members"]})
+    subgroups = [c for c in auto_groups if c['component_evidence'].get('scope') == 'contact_subgroup']
+    summary['auto_contact_subgroups'] = len(subgroups)
+    summary['auto_contact_subgroup_submissions'] = len({sid for c in subgroups for sid in c['component_evidence']['members']})
+    write_excel(folder / "automatic_child_groups.xlsx", {
+        "自動確認群組": [{"group_id": c["case_id"], "rule": c["rule"],
+            "scope": c['component_evidence'].get('scope', 'whole_review_group'),
+            "review_group_id": c['component_evidence'].get('review_group_id', c['case_id']),
+            "submission_count": len(c["component_evidence"]["members"]),
+            "direct_links": len(c["component_evidence"]["direct_edges"]),
+            "indirect_comparisons": len(c["component_evidence"]["indirect_pairs"])} for c in auto_groups],
+        "提交對應": [{"group_id": c["case_id"], "submission_id": sid, "child_id": by_id[sid]["child_id"]}
+                     for c in auto_groups for sid in c["component_evidence"]["members"]]})
     summary["review_warning_code_counts"] = dict(Counter(code for c in cases for code in c.get("review_warning_codes", [])))
     summary["BD_general_contact_fallback"] = sum(p["rule"] == "same_adult_reported_birth_relationship_general_contact_fallback" for p in adult_pairs or [])
+    summary['BD_any_exact_contact'] = sum(p['rule'] == 'same_adult_reported_birth_any_exact_contact' for p in adult_pairs or [])
+    summary['adult_identity_policy'] = 'same_child_valid_equal_birth_year_any_exact_contact_relationship_informational'
+    if any(r.get('parent_wave_policy') for r in records):
+        parents = [r for r in records if r['role'] == 'parent']
+        summary['parent_phase_counts'] = dict(Counter(r.get('parent_phase', 'not_eligible') for r in parents))
+        summary['parent_T0_before_student_day'] = sum(r.get('selected_wave') == 'T0' and
+            r.get('student_parent_calendar_gap_days', 0) < 0 for r in parents)
+        summary['BD_parent_interval_under_90_days'] = sum(
+            (timestamp(by_id[p['t1']]['observed_at']) - timestamp(by_id[p['t0']]['observed_at'])).total_seconds() < 90*86400
+            for p in adult_pairs or [])
     names = {("student", "T0"): "A_T0-student_final", ("parent", "T0"): "B_T0-parent_final",
              ("student", "T1"): "C_T1-student_final", ("parent", "T1"): "D_T1-parent_final"}
     for (role, wave), name in names.items():
         rows = [export_row(r) for r in selected if r["role"] == role and r["selected_wave"] == wave]
-        columns = ["same_person_entry_id", "same_person_match_rule"] + schemas[role] + ["submission_id", "child_id", "source_claimed_timepoint", "final_timepoint", "wave_reason", "observed_at", "time_confidence", "date_basis", "identity_rules", "adult_birth_year_status", "adult_identity_exception_type"]
+        columns = ["same_person_entry_id", "same_person_match_rule"] + schemas[role] + ["submission_id", "child_id", "source_claimed_timepoint", "final_timepoint", "wave_reason", "observed_at", "time_confidence", "date_basis", "identity_rules", "adult_birth_year_status", "adult_identity_exception_type"] + PARENT_WAVE_FIELDS
         write_excel(folder / "3.1.1_ABCD_reconstruction" / (name + ".xlsx"), {"Sheet1": pd.DataFrame(rows, columns=columns)})
         summary[name[0]] = len(rows)
     longitudinal = set()
@@ -182,6 +209,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         if role == "parent" and adult_pairs is not None:
             columns = ["child_id", "respondent_id", "adult_match_rule", "T1_family_selected_wave"] + columns[1:]
         columns += [w + "_" + k for w in ["T0", "T1"] for k in ["date_basis", "identity_rules", "adult_birth_year_status", "adult_identity_exception_type"]]
+        columns += [w + '_' + k for w in ['T0','T1'] for k in PARENT_WAVE_FIELDS]
         write_excel(folder / "3.1.1_ABCD_reconstruction" / (label + ".xlsx"), {"Sheet1": pd.DataFrame(rows, columns=columns)})
         summary[label[:2]] = len(rows)
     for wave, label in [("T0", "E_T0-student&parent-paired"), ("T1", "F_T1-student&parent-paired")]:
@@ -197,6 +225,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                 row.update(student_observed_at=s.get("observed_at"),parent_observed_at=p.get("observed_at"),
                            student_time_confidence=s["time_confidence"],parent_time_confidence=p["time_confidence"],
                            student_parent_date_gap_days=abs((st-pt).total_seconds())/86400 if st and pt else None)
+                row.update({k: p.get(k) for k in PARENT_WAVE_FIELDS})
                 # Preserve scale prefixes expected by legacy descriptive scripts.
                 for role_record in [s, p]:
                     for k, v in role_record["answer"].items():
@@ -228,8 +257,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
             relationship1 = text(p1["answer"].get("adult_demographics_06"))
             birth0 = text(p0["answer"].get("adult_demographics_05"))
             birth1 = text(p1["answer"].get("adult_demographics_05"))
-            caregiver = "reported_relationship_changed" if relationship0 and relationship1 and relationship0 != relationship1 else (
-                "reported_birth_year_changed" if birth0 and birth1 and birth0 != birth1 else "identity_unconfirmed")
+            caregiver = "reported_birth_year_changed" if birth0 and birth1 and birth0 != birth1 else "identity_unconfirmed"
             if adult_pairs is not None:
                 from .respondents import adult_match
                 reviewed = adult_cases.get(tuple(sorted([p0["submission_id"], p1["submission_id"]])))
@@ -237,6 +265,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                 caregiver = ("same_adult_by_reviewed_evidence" if rule == "reviewer_confirmed_same_adult"
                              else "same_adult_by_accepted_evidence") if status == "confirmed" else rule
             ef.append({"child_id": child, "caregiver_status": caregiver,
+                       'reported_relationship_changed': bool(relationship0 and relationship1 and relationship0 != relationship1),
                        **{"T0_" + k: v for k, v in a.items()}, **{"T1_" + k: v for k, v in b.items()}, **permanent(child)})
     write_excel(folder / "3.1.3_manual_pairing/EF_T0T1-student&parent-paired_final.xlsx", {"paired": pd.DataFrame(ef, columns=list(ef[0]) if ef else ["child_id", "caregiver_status", "dyad_id", "registration_state"])})
     summary["EF"] = len(ef)
@@ -263,11 +292,13 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                          "child_report_longitudinal": (r["child_id"], role) in child_longitudinal,
                          "dyad": (r["child_id"], r["selected_wave"]) in dyads,
                          "longitudinal_dyad": r["child_id"] in ef_children,
+                         **{k: r.get(k) for k in PARENT_WAVE_FIELDS},
                          **scores[r["submission_id"]]}
     analysis = [analysis_row(r) for r in selected]
     summary["analysis_mainstream_rows"] = sum(r["mainstream"] for r in analysis)
     summary["analysis_other_or_unknown_rows"] = len(analysis) - summary["analysis_mainstream_rows"]
     analysis_columns = ["submission_id", "child_id", "role", "wave", "source", "source_type", "source_label", "school", "school_type", "gender", "grade", "age_at_observation", "time_confidence", "date_basis", "identity_rules", "respondent_id", "mainstream", "longitudinal", "child_report_longitudinal", "dyad", "longitudinal_dyad"] + list(metrics({}, "student"))
+    analysis_columns += PARENT_WAVE_FIELDS
     pd.DataFrame(analysis, columns=analysis_columns).to_parquet(folder / "analysis.parquet", index=False)
     if adult_pairs is not None:
         bd_analysis = [analysis_row(by_id[p[w]], wave) for p in adult_pairs for w, wave in [("t0", "T0"), ("t1", "T1")]]
@@ -295,7 +326,8 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                    exact_contact=bool(ca & cb), one_digit_phone=any(one_digit_phone(x, y) for x in ca for y in cb),
                    adult_birthyear_agrees=bool(ea["birth_year"] and ea["birth_year"] == eb["birth_year"]),
                    adult_relationship_agrees=bool(ea["relationship"] and ea["relationship"] == eb["relationship"]),
-                   adult_personal_contact_agrees=bool(set(ea["personal_contacts"]) & set(eb["personal_contacts"])))
+                   adult_personal_contact_agrees=bool(set(ea["personal_contacts"]) & set(eb["personal_contacts"])),
+                   adult_any_contact_agrees=bool(set(ea['all_contacts']) & set(eb['all_contacts'])))
         row.update(review_warnings="；".join(c.get("review_warnings", [])),
                    review_warning_codes=";".join(c.get("review_warning_codes", [])))
         evidence.append(row)
@@ -312,7 +344,14 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         "processing_decisions": [{"submission_id": r["submission_id"], "status": r["status"],
                                   "duplicate_of": r.get("duplicate_of"), "selected_wave": r["selected_wave"],
                                   "claimed_wave": r["claimed_wave"], "wave_reason": r.get("wave_reason"),
-                                  "time_confidence": r["time_confidence"], "issues": ";".join(r["issues"])} for r in records]})
+                                  "time_confidence": r["time_confidence"], "issues": ";".join(r["issues"]),
+                                  **{k: r.get(k) for k in PARENT_WAVE_FIELDS}} for r in records]})
+    if any(r.get('parent_wave_policy') for r in records):
+        audit_fields = ['submission_id','child_id','source_id','claimed_wave','selected_wave','observed_at',
+                        'time_confidence','date_basis','status','wave_reason','duplicate_of'] + PARENT_WAVE_FIELDS
+        parent_audit = pd.DataFrame([{k:r.get(k) for k in audit_fields} for r in records if r['role']=='parent'], columns=audit_fields)
+        parent_audit.to_parquet(folder/'parent_wave_audit.parquet',index=False)
+        write_excel(folder/'parent_wave_audit.xlsx', {'家長輪次追查':parent_audit})
     if registration_rows is not None:
         from .dyads import safe_tracking_rows
         tracking = pd.DataFrame(safe_tracking_rows(registration_rows))

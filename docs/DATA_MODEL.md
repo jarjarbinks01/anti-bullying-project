@@ -27,9 +27,13 @@ Qualtrics 的 namespace 在設定中登記，現時用本機 survey 別名；接
 | release_candidates | 該版本的候選證據及狀態 | 每個版本新建 |
 | publication | 唯一目前版本指標 | 驗證發布／回退時切換 |
 
-parent 的 identity_members 指向「回應所指孩子」。BD 另要求成人出生年份、與孩子關係及精確聯絡一致，或有效人工 LINK_ADULT。本人精確聯絡優先；至少一份本人聯絡缺失時，可按已啟用的後備規則使用其他精確電話／電郵，見[現行規則](MATCHING_RULES.md)。`respondent_id` 是該孩子基線成人的分析識別碼，並非跨孩子永久成人登記。`bd_selected_wave`／`bd_match_rule` 保存成人專用輪次及證據；家庭 `selected_wave` 可與 BD 不同。成人決定用獨立 adult_pair target，證據更新重新待審。EF 只要求孩子一致，另列照顧者一致／變更／未知，不以成人 ID 跨孩子連結。
+parent 的 identity_members 指向「回應所指孩子」。BD 另要求成人出生年份有效、一致及任一聯絡欄精確電話／電郵一致，或有效人工 LINK_ADULT。多項聯絡逐項拆分；關係及其他關係文字只作參考，見[現行規則](MATCHING_RULES.md)。`respondent_id` 是該孩子基線成人的分析識別碼，並非跨孩子永久成人登記。`bd_selected_wave`／`bd_match_rule` 保存成人專用輪次及證據；家庭 `selected_wave` 可與 BD 不同。成人決定用獨立 adult_pair target，證據更新重新待審。EF 只要求孩子一致，另列照顧者一致／變更／未知；`reported_relationship_changed`另記原填關係是否不同，不直接代表填卷人不同，也不以成人 ID 跨孩子連結。
 
 ## 日期與原始值
+
+`parent_wave_policy=student_anchored_hk_nearest_v2` 自2026-10-16選最接近學生T0的家長基線，可較早且不設硬上限；學生T1香港日期同日或之後的家長回應先保留作T1。歷史v1仍可重現舊單向選取。`parent_phase`為T0／T1／unanchored／date_unreliable，historical只用於v1。`student_t0_id`及`student_t1_id`保存當版學生錨點，`student_anchor_id`／`student_anchor_at`保存該家長回應所比較的學生輪次。`student_parent_calendar_gap_days`為家長減學生的香港曆日差；`student_parent_elapsed_gap_days`為家長減學生實際時間差（日），負數表示家長較早。`parent_response_interval_days`按家長實際填卷時間差計算，不以原標籤或匯入時間代替。`parent_wave_audit.xlsx`及同名parquet包括未選家長回應及原因。未錨定家長沒有正式輪次，原標籤仍保存。
+
+永久家庭身份與當版分析資格分開。`analysis_t0_pair_available`／`analysis_t1_pair_available`列明是否有選定親子測量；已有登記不因時間政策改變而失去家長T0就暫停。身份證據變動、拆分、多ID合併及人工不配對衝突仍按原流程暫停。
 
 目前 `observed_at` 保存由現有 `建立時間` 解析的分析時間，或人工核實时间。`date_basis` 分 system_creation／batch_assigned_creation；`time_confidence` 分 observed、manual_verified、accepted_creation_time、batch_only、unknown。按 Jarvis 2026-10-06 決定，紙本批次指定建立時間標為 accepted_creation_time，可計算90日，但不稱為實際日期核實；年齡不據此推定。`batch_at` 保存批次時間，`imported_at` 保存內容版本首次匯入時間。原值與日期政策均可追查。
 

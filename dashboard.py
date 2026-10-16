@@ -8,7 +8,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from study2.common import load_config
+from study2.common import load_config, digest, file_hash
+from study2.parent_waves import POLICY as NEAREST_PARENT_POLICY
+from study2.review_dispatch import ROUTES, REASONS, queue_snapshot
 from study2.outputs import descriptive_summary, source_category
 from study2.store import connect, current
 from study2.dashboard_views import (SAMPLE_NAMES, analysis_cohort, selected_sample,
@@ -19,6 +21,7 @@ st.set_page_config(page_title="Study 2 研究資料", page_icon="📊", layout="
 cfg = load_config(Path(os.environ.get("STUDY2_CONFIG", Path(__file__).parent / "config.local.json")))
 db = connect(Path(cfg["state_dir"]), readonly=True)
 release = current(db)
+decision_revision = digest([tuple(r) for r in db.execute('SELECT decision_id,payload_json,supersedes FROM decisions ORDER BY decision_id')])
 db.close()
 st.title("Study 2 研究資料")
 st.caption("本機原型 · 確認配對與待審個案分開 · 每項統計顯示有效樣本及缺失數")
@@ -26,17 +29,29 @@ if not release:
     st.info("尚未發布資料。請先完成資料匯入及檢查。")
     st.stop()
 summary = json.loads(release["stats_json"])
+student_anchored = bool(summary.get('parent_wave_policy'))
+nearest_parent_baseline = summary.get('parent_wave_policy') == NEAREST_PARENT_POLICY
 release_path = Path(release["path"])
 rule_names = {
     "exact_school_contact_child_demo": "同校、聯絡及孩子身份一致",
     "one_digit_phone_school_child_demo": "同校、電話差一位、孩子身份一致",
-    "exact_contact_school_transfer_child_demo": "轉校、精確聯絡及孩子身份一致",
+    "exact_contact_school_transfer_child_demo": "不同學校、精確聯絡及孩子身份一致",
+    "child_contact_bridge_component": "聯絡規則連通的身份群組／子群（自動確認）",
+    'child_group_contact_bridge': '群組聯絡連結核實（部分提交沒有直接共同聯絡）',
+    'child_group_contact_gap': '群組尚有未連起的子群',
+    'child_group_identity_conflict': '群組身份矛盾，交指定執行者',
+    'child_group_manual_nonmatch': '群組含人工不配對限制',
+    'child_group_incomplete_members': '群組部分提交資料不足，交指定執行者',
     "fuzzy_contact_child_demo": "電話近似，尚未符合自動規則",
     "school_child_demo": "同校及孩子身份，聯絡證據不足",
     "transfer_contact_child_demo": "轉校候選，證據未確認",
     "contact_missing_or_conflicting_child_demo": "共享聯絡，孩子身份不足或矛盾",
     "same_adult_reported_birth_relationship_personal_contact": "成人出生年份、關係及本人聯絡一致",
     "same_adult_reported_birth_relationship_general_contact_fallback": "本人聯絡缺失；成人年份、關係及其他精確聯絡一致",
+    'same_adult_reported_birth_personal_contact': '成人出生年份及任一本人電話／電郵一致',
+    'same_adult_reported_birth_any_exact_contact': '成人出生年份及任一聯絡欄精確電話／電郵一致',
+    'no_exact_adult_contact': '沒有任何精確相同的電話／電郵',
+    'different_child_identity': '兩份回應指向不同孩子',
     "no_exact_personal_adult_contact": "缺少一致的成人本人聯絡",
     "adult_birth_year_missing_or_invalid": "成人出生年份缺失或無效",
     "adult_relationship_missing_or_invalid": "與孩子關係缺失或無效",
@@ -56,7 +71,10 @@ rule_names = {
 st.caption(f"資料版本：{release['release_id']} · 版本產生時間：{release['created_at']}")
 if summary.get("source_scope") == "merged_abcd":
     st.info("資料來源：2.1.2 的四份 A／B／C／D 合併 Excel。電話差一位及轉校規則已啟用；BD 要求同一成人填卷人。")
-    st.caption(f"按研究負責人決定，使用目前建立時間計算90日；其中 {summary.get('batch_creation_time_submissions',0):,} 行是批次指定日期。日期來源標記保留。")
+    st.caption(f"按研究負責人決定，使用目前建立時間；其中 {summary.get('batch_creation_time_submissions',0):,} 行是批次指定日期。日期來源標記保留。")
+    if student_anchored:
+        st.info('以學生為錨：先保留學生T1同日或之後的家長回應作T1；其餘選最接近學生T0的家長基線，可早於學生，不設日期差上限。家長自身沒有90日門檻，原始標籤保留。'
+                if nearest_parent_baseline else '以學生為錨：學生T1至少相隔90日；家長按學生兩輪的香港曆日分段，不設家長自身90日門檻。原始問卷標籤保留。')
 st.button("重新讀取目前版本", on_click=lambda: st.cache_data.clear())
 if summary.get("research_validation") == "not_yet_reviewed":
     st.warning("程式檢查已通過；研究同事尚未建立人工核實案例集，實際配對準確度未驗證。")
@@ -78,6 +96,20 @@ def data(release_id, path):
 
 
 frame = data(release["release_id"], str(release_path))
+
+
+@st.cache_data(show_spinner=False)
+def review_workload(release_id, state_dir, policy_hash, decisions, workspace_revision, _cfg):
+    return queue_snapshot(_cfg, include_cases=True)
+
+
+review_files = [Path(cfg['state_dir']) / ('review.sqlite' + suffix) for suffix in ('', '-wal')]
+review_revision = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None for p in review_files)
+dispatch = review_workload(release['release_id'], cfg['state_dir'],
+    digest([file_hash(Path(__file__).parent/'study2'/name) for name in ('review_dispatch.py','review_groups.py','review_core.py')]), decision_revision, review_revision, cfg)
+if dispatch['release_id'] != release['release_id']:
+    st.info('資料正在更新，請重新讀取目前版本。')
+    st.stop()
 
 
 @st.cache_data(show_spinner=False)
@@ -117,14 +149,24 @@ with overview:
     for c, label, value in zip(cols, ["提交記錄", "學生跨期 AC", "同一成人跨期 BD" if summary.get("bd_requires_same_adult") else "家長回應跨期配對", "跨期親子 EF"], [summary["submissions"], summary["AC"], summary["BD"], summary["EF"]]):
         c.metric(label, f"{value:,}")
     st.caption("要核對組成首頁數字的個案，開啟「配對證據」→「最終分析樣本」；每行代表一組。候選比較的宗數另列，不等於最終樣本組數。")
+    if summary.get('matching_policy', {}).get('allow_contact_bridge_components'):
+        st.caption(f"本版有 {summary.get('auto_contact_bridge_groups',0):,} 個聯絡連通群組（{summary.get('auto_contact_bridge_submissions',0):,} 份提交）按已接受規則、孩子生日及性別一致而自動確認；其中 {summary.get('auto_contact_subgroups',0):,} 個是在較大待審群組內單獨確認的子群。子群內連結毋須重審；子群之間欠證據的連結及孤立問卷等待新資料，不直接派卡。單數問卷正常保留，T0／T1 另按日期選取。")
     st.subheader("各輪保留樣本及親子配對")
     if summary.get("bd_requires_same_adult"):
         st.caption(f"同一孩子的家長回應跨期共 {summary.get('parent_child_longitudinal',0):,} 組；其中BD只接納同一成人證據通過的組別。{summary.get('BD_alternative_followups',0):,} 組BD使用基線家長較早的合資格T1，與F的最新家長回應不同。")
-        if summary.get("matching_policy", {}).get("allow_exact_general_contact_when_personal_missing"):
+        if summary.get('adult_identity_policy') == 'same_child_valid_equal_birth_year_any_exact_contact_relationship_informational':
+            st.caption(f"BD 有 {summary.get('BD_any_exact_contact', 0):,} 組按其他聯絡欄的精確電話／電郵確認；本人聯絡即使不同也可使用。成人出生年份須有效且一致；與孩子關係保留供查看，不作配對門檻。多項聯絡逐項拆分，任一項精確一致即可。")
+        elif summary.get("matching_policy", {}).get("allow_exact_general_contact_when_personal_missing"):
             st.caption(f"BD 有 {summary.get('BD_general_contact_fallback', 0):,} 組使用本人聯絡缺失的後備規則：其他精確電話／電郵一致，並通過成人年份、關係及孩子身份檢查。")
     st.dataframe(pd.DataFrame([
         {"輪次": "T0", "學生": summary["A"], "家長回應": summary["B"], "親子配對": summary["E"]},
         {"輪次": "T1", "學生": summary["C"], "家長回應": summary["D"], "親子配對": summary["F"]}]), hide_index=True, width="stretch")
+    if student_anchored:
+        phase_counts = summary.get('parent_phase_counts', {})
+        if nearest_parent_baseline:
+            st.caption(f"有 {summary.get('parent_T0_before_student_day',0):,} 份選定家長T0早於學生T0的香港日期，已保留有方向的日期差。未有可用學生基線的家長回應另列 {phase_counts.get('unanchored',0):,} 份。BD有 {summary.get('BD_parent_interval_under_90_days',0):,} 組家長自身相隔不足90日。")
+        else:
+            st.caption(f"家長歷史回應（早於學生T0）：{phase_counts.get('historical',0):,} 份；未有可用學生基線：{phase_counts.get('unanchored',0):,} 份。全部保留追查，未納入正式家長T0／T1。BD有 {summary.get('BD_parent_interval_under_90_days',0):,} 組家長自身相隔不足90日。")
     st.subheader("各階段數量")
     st.caption("本版從 2.1.2 的四份合併檔接入；1.3／2.1.1 的標準化沿用上游結果，不重複執行。各階段按提交、身份群組或配對組數計數，不能直接相加。")
     st.table(stage_overview(summary).style.hide(axis="index"))
@@ -149,6 +191,14 @@ with overview:
     st.caption("此版本只讀取以上登記檔案。原始提交數包括未完成及之後被排除的回應，並非獨立參與者人數。")
     st.caption("全部樣本按選定回應計數。身份尚未釐清時，不能把回應數直接當作已確認的獨立孩子人數。")
     with st.expander("資料核實與更新狀態"):
+        review_columns = st.columns(3)
+        review_columns[0].metric('身份審核工作（群組／成人）', dispatch['remaining_general_reviews'])
+        review_columns[1].metric('有聯絡的資料更正比較', dispatch['pending_routes'].get('correction', 0))
+        review_columns[2].metric('無可用聯絡，不派審', dispatch['pending_routes'].get('untraceable', 0))
+        st.metric('證據不足，待新資料（暫不合併）',dispatch['awaiting_evidence_work'])
+        st.caption(f"其中孩子群組 {dispatch['awaiting_evidence_groups']:,} 個、成人比較 {dispatch['awaiting_evidence_adult_comparisons']:,} 宗。這些是未證實的連結，不是已確認不同身份，也不要求同事逐宗填卡。")
+        st.caption('有可用電話不代表有核實依據。子群只有生日、性別及學校一致，或電話近似但沒有可核實來源時，等待新資料。Jarvis 登記原始紙本／既有紀錄的位置及具體問題後，才恢復一般派審；生日、性別矛盾及人工限制仍交既有更正／裁定流程。')
+        st.caption(f"孩子身份每組只派一宗：{dispatch['child_groups_pending']:,} 組；成人比較 {dispatch['adult_comparisons_pending']:,} 宗。整組有矛盾而交指定執行者：{dispatch['child_groups_operator']:,} 組。已通過直接規則的兩份問卷列為群組證據，毋須重審；人工裁定經批准、套用及重新發布後更新正式配對。")
         quality_columns = st.columns(3)
         quality_metrics = [
             ("待處理學校名稱", summary["school_names_pending"]),
@@ -211,6 +261,18 @@ with analysis:
     count_columns[1].metric("學校範圍後 N", school_scope_n)
     count_columns[2].metric("目前樣本 N", len(subset))
     st.caption(f"學校範圍排除 {len(homepage_subset)-school_scope_n:,} 份；性別、學校、來源及規則篩選再排除 {school_scope_n-len(subset):,} 份。N 按目前輪次的回應計數，量表有效 N 另扣缺題。")
+    if student_anchored and role == 'parent':
+        gap_columns = ['submission_id','student_parent_calendar_gap_days','parent_response_interval_days']
+        if nearest_parent_baseline:
+            gap_columns.insert(2,'student_parent_elapsed_gap_days')
+        gap_rows = subset.reindex(columns=gap_columns).rename(columns={
+            'submission_id':'家長提交ID','student_parent_calendar_gap_days':'距學生該輪日數（香港曆日）',
+            'student_parent_elapsed_gap_days':'家長減學生時間差（日）',
+            'parent_response_interval_days':'距家長T0日數（實際間隔）'})
+        with st.expander('核對家長與學生日期差'):
+            st.caption('日期差為家長減學生：負數表示家長較早，正數表示較遲；同一香港曆日仍可有實際時間差。家長T1沒有自身90日門檻；缺少家長T0時，兩次家長回應間隔維持缺失。')
+            st.dataframe(gap_rows, hide_index=True, width='stretch')
+            st.download_button('下載目前家長日期差',gap_rows.to_csv(index=False).encode('utf-8-sig'),'study2-parent-date-gaps.csv','text/csv')
     demographics = st.columns(2)
     with demographics[0]:
         genders = subset["gender"].fillna("").map({"0": "男", "1": "女", "": "缺失"}).fillna("其他／未識別").value_counts().rename_axis("孩子性別").reset_index(name="回應數")
@@ -228,19 +290,38 @@ with analysis:
     st.dataframe(stats.rename(columns={"metric": "指標", "sample_n": "樣本N", "valid_n": "有效N", "missing_n": "缺失N", "mean_or_proportion": "平均／比例", "sd": "標準差"}), hide_index=True, width="stretch")
     st.download_button("下載目前篩選的描述統計", stats.to_csv(index=False).encode("utf-8-sig"), "study2-descriptives.csv", "text/csv")
 with method:
+    if summary.get('matching_policy', {}).get('allow_contact_bridge_components'):
+        st.markdown('**聯絡群組身份確認**：群組內孩子生日及有效性別一致，且已接受的直接規則能連起全部提交時，自動確認同一孩子。啟用子群確認的版本會逐個聯絡連通子群檢查，不因外圍缺少連結而擋住有充分證據的子群。不得切開既有人工身份群組；子群內有身份矛盾、人工不配對或失效決定時不自動通過。不同子群欠證據不等於已確認不同孩子；單數問卷正常保留，重填及輪次另按規則判斷。')
+    if nearest_parent_baseline:
+        st.markdown('''
+        - **學生T0／T1**：最早合資格學生基線，及至少90日後的最新合資格學生T1。
+        - **家長T1優先**：學生T1香港日期同日或之後的家長回應先列T1候選，選最新一份，包括原標T0的回應，不拿來填補T0。
+        - **家長T0**：從其餘同一孩子的合資格回應中，按實際建立時間與學生T0的絕對差距選最近一份，可早於學生，不設硬上限；沒有學生T1時所有有可靠日期的家長回應均可作T0候選。等距候選留待核實。
+        - **日期差**：保存家長減學生的香港曆日差及實際時間差；負數表示家長較早，正數表示家長較遲，未選回應仍可追查。
+        - **成人及重填**：家長自身沒有90日門檻，BD仍須同一成人。30日重填只在同一輪、同一成人內處理，保護已選最近基線，不跨T0／T1去重。
+        - **資料缺口**：沒有學生基線則另列；只有家長T1而沒有T0可進F，不進BD／EF。原始提交、標籤、身份裁定及永久ID保留。
+        ''')
+    elif student_anchored:
+        st.markdown('''
+        - **學生T0／T1**：保留最早合資格學生基線，選至少90日後的最新合資格學生T1。
+        - **家長分輪**：按香港曆日。早於學生T0只列歷史；學生T0當日至學生T1前一日屬T0候選；學生T1同日或之後屬T1候選，原始標籤不作門檻。
+        - **家長選取**：T0選最早候選（最接近學生基線），T1選最新候選。尚未有學生T1時，家長T0不設固定日期差上限。不設家長自身90日門檻。
+        - **家長資料缺口**：未有學生基線則另列；有家長T1但沒有家長T0，可進入F，不進入BD／EF。原始提交及永久家庭ID保留。
+        - **重填**：只在同一學生輪次內比較家長重填，不跨T0／T1刪除。BD仍須確認同一成人，另列實際測量間隔。
+        ''')
     st.markdown("""
     - **追蹤孩子**：家長回應依問卷所指孩子連結，不能用家長電話把兄弟姊妹合併。
-    - **T0**：最早的合資格原始回應。後來的短期重填不會取代T0；原填T1的首次回應保留原標籤及推定理由。
-    - **T1**：最新、距 T0 至少90日的回應。本次合併資料依研究負責人決定使用現有建立時間，保留系統／批次日期來源。
+    - **學生T0**：最早的合資格原始回應。後來的短期重填不會取代學生T0；原填T1的首次回應保留原標籤及推定理由。
+    - **學生T1**：最新、距學生T0至少90日的回應。使用現有建立時間，保留系統／批次日期來源。
     - **缺失日期**：單次回應可推定T0；多次回應的次序不明時先待審。
     - **正式配對**：只使用已確認的身份連結；待審候選不會被暫時當成已配對。
     - **量表計分**：所需題目完整才計分；缺題維持缺失，不當作零。
     - **分母**：每項指標使用其有效N；跨期樣本與每輪全部樣本的分母不同。
     - **首頁與描述統計**：首頁包括全部學校；描述統計預設只限主流學校，頁面會列明學校範圍及其他篩選造成的數量差。
     - **最終樣本與候選比較**：AC／BD／E／F每行是一組兩份選定回應；EF每行是一組四份選定回應。候選比較包括未被選為最終T0／T1的回應，一宗候選不是一組最終样本。
-    - **BD家長身份**：同一孩子之外，成人出生年份及與孩子關係須一致。優先使用本人精確聯絡；本版如啟用後備規則，至少一方本人聯絡缺失時可使用其他精確電話／電郵。兩方均有本人聯絡但不一致時不使用後備規則；逐宗人工裁定另行保留。同孩子但填卷人更換不進BD。
+    - **BD家長身份**：兩份回應須指向同一孩子，成人出生年份有效且一致，所有聯絡欄中任一精確電話／電郵相同即可。多項聯絡逐項拆分，比對電話或電郵集合的交集；本人聯絡不同仍可使用其他共同聯絡。與孩子關係保留為原填資料，不作確認門檻。電話近似不作成人自動確認。逐宗人工裁定另行保留。
     - **電話近似及轉校**：本次接受同校且電話只差一個數字，以及相同聯絡但轉校；孩子完整生日及性別仍須相同，候選及整組不得有矛盾。電話互換兩位、電話近似兼轉校仍待審。
-    - **親子日期差**：確認指向同一孩子便可配對，不限制學生與家長日期差；輸出另保存日期差供檢查。
+    - **親子身份與測量輪次**：身份確認與日期選取分開。親子須先確認指向同一孩子，再依當版輪次規則選取，輸出另保存日期差。
     - **年級／日期提示**：按香港時間、9月為學年分界及已知小學／中學階段作初步檢查；提示可涉及跳級、年級下降、跨學年不變、階段不明及批次日期。提示不會自行更正、拒配或排除回應。
     """)
 with evidence_tab:
@@ -266,7 +347,7 @@ with evidence_tab:
         if sample == "BD":
             st.caption("使用BD專用的同一成人選擇；家長T1可與D／F的最新家長回應不同。")
         if sample in {"E", "F", "EF"}:
-            st.caption("親子確認指向同一孩子，不限制學生與家長日期差。")
+            st.caption('親子確認指向同一孩子；家長按學生香港日期分輪，日期差另列。' if student_anchored else '親子確認指向同一孩子，不限制學生與家長日期差。')
         display = sample_display(rows, sample)
         for column in display:
             if column.endswith("_孩子身份規則"):
@@ -282,6 +363,17 @@ with evidence_tab:
         st.info("此舊版本沒有配對證據摘要。")
     elif view.startswith("候選"):
         evidence = pd.read_parquet(evidence_path)
+        group_rows = pd.DataFrame(dispatch.get('groups', []))
+        if not group_rows.empty:
+            evidence = pd.concat([evidence, group_rows.drop(columns='route')], ignore_index=True)
+        routing = pd.DataFrame(dispatch['cases'])
+        routing['dispatch_reason'] = routing['reasons'].map(lambda codes: '；'.join(REASONS[x] for x in codes))
+        evidence = evidence.merge(routing.drop(columns='reasons'), on='case_id', how='left', validate='one_to_one')
+        usage = st.selectbox('候選用途', ['一般身份審核', '證據不足，待新資料（暫不合併）', '資料更正（有可用聯絡）', '無可用聯絡，不派審', '全部候選（含背景參考）'], key='candidate_usage')
+        selected_route = {'一般身份審核':'review','證據不足，待新資料（暫不合併）':'awaiting_evidence','資料更正（有可用聯絡）':'correction','無可用聯絡，不派審':'untraceable'}.get(usage)
+        if selected_route:
+            evidence = evidence[(evidence['route'] == selected_route) & evidence['status'].eq('pending')]
+            st.caption('這個用途只列目前待處理的比較，與首頁資料核實工作量使用同一口徑。查看已有結論或背景比較，請選「全部候選（含背景參考）」。')
         if "review_warnings" not in evidence:
             evidence["review_warnings"] = ""
         only_hints = st.checkbox("只看有年級／日期提示的候選", key="only_review_hints")
@@ -289,7 +381,7 @@ with evidence_tab:
             evidence = evidence[evidence["review_warnings"].fillna("").ne("")]
         st.caption("年級／日期提示供人工核實，不代表身份不同或自動拒配。親子日期差沒有拒配上限。")
         controls = st.columns(3)
-        kind_names = {"identity":"孩子身份比較（同輪次或跨期）", "family":"親子身份比較", "respondent":"成人身份比較", "dedup":"重複回應", "date":"日期資格"}
+        kind_names = {"identity":"孩子身份比較（同輪次或跨期）", "identity_group":"孩子群組自動確認", "family":"親子身份比較", "respondent":"成人身份比較", "dedup":"重複回應", "date":"日期資格"}
         status_names = {"confirmed":"規則通過／人工確認", "pending":"待審", "rejected":"未通過／已拒絕", "unmatched":"未配對"}
         kinds = controls[0].multiselect("候選類別", sorted(evidence["kind"].unique()), format_func=lambda x: kind_names.get(x,x))
         states = controls[1].multiselect("審核狀態", sorted(evidence["status"].unique()), format_func=lambda x: status_names.get(x,x))
@@ -297,30 +389,43 @@ with evidence_tab:
         for column, values in [("kind", kinds), ("status", states), ("rule", case_rules)]:
             if values:
                 evidence = evidence[evidence[column].isin(values)]
-        st.metric("符合篩選的候選個案", len(evidence))
-        st.caption("這裡計算候選比較宗數，包括同輪次、學生、家長及多次提交；即使已確認，也不等於首頁AC／BD／EF組數。重現首頁數字請切換「最終分析樣本」。")
+        st.metric('符合篩選的審核工作' if selected_route == 'review' else
+                  '符合篩選的待新資料個案' if selected_route == 'awaiting_evidence' else "符合篩選的候選個案", len(evidence))
+        if selected_route == 'review':
+            st.caption('孩子身份每行是一個完整群組；提交 A／B 只代表證據缺口。開啟受控 Excel 的群組參考核實全組。成人身份仍按兩份家長問卷比較。')
+        if selected_route == 'review':
+            st.caption('這裡計算孩子群組加成人比較的審核工作數，不是參加者人數或 AC／BD／EF 組數。重現首頁研究樣本數，請切換「最終分析樣本」。')
+        elif selected_route == 'awaiting_evidence':
+            st.caption('每行是一個孩子群組或一宗成人比較。各已確認子群及其 T0／T1 保留；沒有新增不配對裁定。已有新問卷或具體可核實來源時再評估，這份清單不要求助手逐宗填卡。')
+        else:
+            st.caption('原始兩份比較及群組任務是不同單位，不能相加當作人工工作量或參加者人數。查看目前派工數請選「一般身份審核」；重現首頁研究樣本數請切換「最終分析樣本」。')
         st.caption("摘要只顯示欄位是否一致，不顯示完整電話、電郵或生日；詳細核實及修改使用受控Excel。")
         display_evidence = evidence.copy()
+        display_evidence['route'] = display_evidence['route'].map(ROUTES)
         display_evidence["kind"] = display_evidence["kind"].map(lambda x: kind_names.get(x, x))
         display_evidence["status"] = display_evidence["status"].map(lambda x: status_names.get(x, x))
         display_evidence["rule"] = display_evidence["rule"].map(lambda x: rule_names.get(x, x))
         display_evidence = display_evidence.drop(columns=["reason"]).rename(columns={
             "case_id":"審核案例ID", "kind":"類別", "status":"狀態", "rule":"規則",
+            'route':'派審分類', 'dispatch_reason':'派審分類原因',
+            'group_id':'所屬審核群組', 'members':'群組提交數', 'passed_pairs':'已通過直接規則的比較數', 'missing_pairs':'缺少直接規則的比較數',
+            'contact_components':'聯絡子群數', 'unresolved_pairs':'尚待核實的子群間比較數',
             "record_a":"提交A", "record_b":"提交B", "role_a":"填卷類別A", "role_b":"填卷類別B",
             "school_a":"學校A", "school_b":"學校B", "grade_a":"年級A", "grade_b":"年級B",
             "observed_at_a":"建立時間A", "observed_at_b":"建立時間B", "date_basis_a":"日期來源A", "date_basis_b":"日期來源B",
             "dob_agrees":"孩子生日一致", "gender_agrees":"孩子性別一致", "exact_contact":"聯絡完全一致",
             "one_digit_phone":"電話差一位", "school_agrees":"校名一致",
-            "adult_personal_contact_agrees":"成人本人聯絡一致", "adult_birthyear_agrees":"成人出生年份一致",
+            "adult_personal_contact_agrees":"成人本人聯絡一致", "adult_any_contact_agrees":"成人任一聯絡一致", "adult_birthyear_agrees":"成人出生年份一致",
             "adult_relationship_agrees":"與孩子關係一致"})
         display_evidence = display_evidence.drop(columns=["review_warning_codes"], errors="ignore").rename(columns={"review_warnings":"年級／日期審核提示"})
         for col in ["填卷類別A", "填卷類別B"]:
             display_evidence[col] = display_evidence[col].map({"student":"學生", "parent":"家長"})
         for col in ["日期來源A", "日期來源B"]:
             display_evidence[col] = display_evidence[col].map({"system_creation":"系統建立時間", "batch_assigned_creation":"批次指定建立時間"})
-        st.dataframe(display_evidence.head(500), hide_index=True, width="stretch")
-        if len(display_evidence) > 500:
-            st.caption(f"表格預覽前500宗；下載包含全部 {len(display_evidence):,} 宗篩選結果。")
+        preview_limit = 1000 if selected_route == 'review' else 500
+        st.dataframe(display_evidence.head(preview_limit), hide_index=True, width="stretch")
+        if len(display_evidence) > preview_limit:
+            st.caption(f"表格預覽前 {preview_limit:,} 宗；下載包含全部 {len(display_evidence):,} 宗篩選結果。")
         st.download_button("下載目前候選證據摘要", display_evidence.to_csv(index=False).encode("utf-8-sig"), "study2-pair-evidence.csv", "text/csv")
 
 with tracking_tab:
@@ -379,7 +484,8 @@ with tracking_tab:
                 'student_received_count':'學生其他回應數','parent_received_count':'家長其他回應數',
                 'student_short_interval_count':'學生未滿90日回應','parent_short_interval_count':'家長未滿90日回應',
                 'student_other_count':'學生其他後續／重填','parent_other_count':'家長其他後續／重填',
-                'identity_candidate_pending':'待核實身份候選數','adult_status':'填卷成人身份','adult_rule':'成人判斷依據'}
+                'identity_candidate_pending':'待核實身份候選數','adult_status':'填卷成人身份','adult_rule':'成人判斷依據',
+                'analysis_t0_pair_available':'本版有T0親子測量','analysis_t1_pair_available':'本版有T1親子測量'}
             names.update(registered_student_id='首次登記學生提交',registered_parent_id='首次登記家長提交',
                          registered_at='永久登記時間',first_published_run_id='首次發布版本')
             view = tracked[[c for c in names if c in tracked]].copy()
@@ -389,7 +495,7 @@ with tracking_tab:
             view['followup_status'] = view['followup_status'].map(lambda x: FOLLOWUPS.get(x,x))
             view['registration_reason'] = view['registration_reason'].map(readable_reason)
             if 'adult_status' in view:
-                view['adult_status'] = view['adult_status'].map({'same':'同一成人','different':'成人不同／關係更換','unconfirmed':'未確認'})
+                view['adult_status'] = view['adult_status'].map({'same':'同一成人','different':'成人不同（依當版規則）','unconfirmed':'未確認'})
             view = view.rename(columns=names)
             st.dataframe(view, hide_index=True, width='stretch')
             st.download_button("下載目前家庭追蹤摘要", view.to_csv(index=False).encode('utf-8-sig'),
