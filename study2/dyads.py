@@ -12,7 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .common import PipelineError, digest, dumps, text, timestamp, utcnow
-from .matching import identity_evidence
+from .matching import identity_evidence, identity_evidence_versions
 
 SCHEMA_VERSION = 1
 SCHEMA = """
@@ -135,13 +135,13 @@ def group_signature(rows, cases, cfg):
                    'cases': sorted([{'id': c['case_id'], 'status': c['status'], 'rule': c['rule'],
                                      'reason': c['reason']} for c in relevant], key=lambda c: c['id']),
                    'rules': {k: cfg.get(k) for k in ('matching_policy', 'date_policy', 'duplicate_days',
-                                                    'minimum_followup_days', 'bd_requires_same_adult')},
+                                                    'minimum_followup_days', 'bd_requires_same_adult', 'parent_wave_policy')},
                    'identity_code': cfg.get('_dyad_identity_code')})
 
 
 def identity_code(cfg=None):
     from .common import file_hash
-    hashes={n:file_hash(Path(__file__).parent/n) for n in ('matching.py','respondents.py','review_core.py')}
+    hashes={n:file_hash(Path(__file__).parent/n) for n in ('matching.py','respondents.py','review_core.py','grades.py','common.py')}
     if cfg and cfg.get('state_dir'):
         compatibility=Path(cfg['state_dir'])/'review_rule_compatibility.json'
         if compatibility.is_file():
@@ -149,6 +149,8 @@ def identity_code(cfg=None):
             complete={**hashes,'review_hints.py':file_hash(Path(__file__).parent/'review_hints.py')}
             if proof.get('format_version')==1 and proof.get('verified') is True and proof.get('current_code')==complete:
                 hashes={n:proof['original_code'][n] for n in hashes}
+    if cfg and cfg.get('parent_wave_policy'):
+        hashes = {**hashes, 'parent_waves.py': file_hash(Path(__file__).parent/'parent_waves.py')}
     return hashes
 
 
@@ -156,7 +158,10 @@ def _tracking(child, rows, cells, cases, cfg):
     """Safe published view. Contact values stay in controlled exports only."""
     row = {'child_id': child, 'dyad_id': None, 'registration_state': 'awaiting_registration',
            'registration_reason': '', 'adult_status': 'unconfirmed', 'adult_rule': '',
-           'member_ids': sorted(r['submission_id'] for r in rows)}
+           'member_ids': sorted(r['submission_id'] for r in rows),
+           'analysis_t0_pair_available': all((child, role, 'T0') in cells for role in ('student','parent')),
+           'analysis_t1_pair_available': all((child, role, 'T1') in cells for role in ('student','parent')),
+           'parent_wave_policy': cfg.get('parent_wave_policy')}
     ids = set(row['member_ids'])
     pending = [c for c in cases if c.get('status') == 'pending' and
                c.get('kind') in {'identity', 'family'} and ids & {c.get('record_a'), c.get('record_b')}]
@@ -183,7 +188,19 @@ def _tracking(child, rows, cells, cases, cfg):
         row[role + '_short_interval_count'] = sum(r.get('status') == 'short_interval_followup' for r in followups)
         row[role + '_other_count'] = sum(r.get('status') in {'extra_followup', 'short_repeat'} for r in followups)
         row[role + '_complete'] = bool(b)
-    row['family_due_at'] = max(dates) if len(dates) == 2 else None
+    if cfg.get('parent_wave_policy'):
+        from .parent_waves import hk_day
+        from datetime import datetime, time
+        from zoneinfo import ZoneInfo
+        s1 = cells.get((child, 'student', 'T1'))
+        # Once observed, the actual student's T1 day controls parent eligibility.
+        # Without it, the student due date is a forecast, not a verified T1 anchor.
+        row['parent_due_at'] = (datetime.combine(hk_day(s1['observed_at']), time.min,
+                                tzinfo=ZoneInfo('Asia/Hong_Kong')).isoformat() if s1
+                                else row['student_due_at'])
+        row['parent_due_basis'] = 'observed_student_T1_day' if s1 else 'forecast_student_T1_not_yet_observed'
+        dates = [row[k] for k in ('student_due_at','parent_due_at') if row.get(k)]
+    row['family_due_at'] = max(dates, key=timestamp) if len(dates) == 2 else None
     s, p = row['student_complete'], row['parent_complete']
     row['followup_status'] = 'both_complete' if s and p else 'student_only' if s else 'parent_only' if p else 'neither_complete'
     p0, p1 = row['parent_t0_id'], row['parent_t1_id']
@@ -248,7 +265,7 @@ def plan(db, run_id, records, cases, cfg):
                 owners[r['child_id']].add(did)
             else:
                 problems[did].add('registered_submission_not_assigned')
-            if evidence_hash(r) != entry['evidence_hash']:
+            if entry['evidence_hash'] not in {digest(e) for e in identity_evidence_versions(r)}:
                 problems[did].add('registered_identity_evidence_changed')
         if len(targets[did]) != 1:
             problems[did].add('registered_group_split_or_missing')
@@ -265,7 +282,9 @@ def plan(db, run_id, records, cases, cfg):
         issues = set()
         if any(canonical_id(d, aliases) not in owners[child] for d in retired_groups[child]):
             issues.add('retired_registration_without_canonical_mapping')
-        if child not in e_children:
+        # A measurement-window change cannot revoke an already verified family.
+        # Identity evidence, lineage splits and merge conflicts still suspend it.
+        if child not in e_children and not (cfg.get('parent_wave_policy') and candidates):
             issues.add('no_current_confirmed_t0_pair')
         if row['contradictory_candidates']:
             issues.add('contradictory_identity_component')

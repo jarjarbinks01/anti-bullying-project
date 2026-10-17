@@ -412,6 +412,10 @@ def invitation_rows(db, cfg, release, records, cases, include_stopped=False):
             if row.get(role + '_complete') or not row.get(role + '_due_at'):
                 continue
             sid = row.get(role + '_t0_id')
+            # A historical registration may remain active without a currently
+            # selected parent baseline. Do not invent an invitation contact anchor.
+            if not sid:
+                continue
             record = by_id[sid]
             a = record['answer']
             payload = {'release_id': release['release_id'], 'dyad_id': row['dyad_id'], 'role': role, 'wave': 'T1',
@@ -445,7 +449,8 @@ def export_invitations(cfg, output):
             rows = invitation_rows(db, cfg, release, records, cases)
             write_excel(Path(output), {'受控邀請清單': rows, '使用說明': [
                 {'說明': '只供指定執行者使用；含個人聯絡資料，不上傳或公開。'},
-                {'說明': 'due_at為該角色T0加90日；family_due_at為共同邀請建議日期。'},
+                {'說明': ('學生due_at為學生T0加90日；家長依學生T1香港日期，尚未收到學生T1時只列預計日期。'
+                           if cfg.get('parent_wave_policy') else 'due_at為該角色T0加90日；family_due_at為共同邀請建議日期。')},
                 {'說明': '本清單不會發送訊息。發送後使用追蹤中心記錄實際日期。'},
                 {'說明': '沒有Qualtrics背景代碼；問卷仍須經身份核實。'},
                 {'說明': '日期欄為可排序的Excel日期，顯示UTC。技術簽章隱藏，但保留供指定執行者核對。'}]}, tracking=True)

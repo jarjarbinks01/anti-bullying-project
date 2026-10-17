@@ -2,6 +2,7 @@
 from zoneinfo import ZoneInfo
 
 from .common import text, timestamp
+from .grades import parse_grade
 
 HK = ZoneInfo("Asia/Hong_Kong")
 
@@ -11,9 +12,7 @@ def grade_position(record):
     grade = record.get("grade")
     if grade not in range(1, 7):
         return None, None
-    raw = text(record.get("grade_raw")).upper()
-    explicit = ("primary" if raw.startswith(("PRIMARY", "P", "小")) else
-                "secondary" if raw.startswith(("SECONDARY", "FORM", "S", "F", "中")) else None)
+    explicit = parse_grade(record.get("grade_raw")).stage
     school = text(record.get("school_type") or record.get("answer", {}).get("school_type")).lower()
     stage = explicit or (school if school in {"primary", "secondary"} else None)
     return (int(grade) + (6 if stage == "secondary" else 0), stage) if stage else (None, None)

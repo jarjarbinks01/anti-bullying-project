@@ -44,6 +44,7 @@ The dashboard opens at `http://127.0.0.1:8501` and reads only the published rele
 ## Research rules and review
 
 - [Matching, pairing and time rules](docs/MATCHING_RULES.md)
+- [Code map and first reading path](docs/CODE_READING_GUIDE.md)
 - [Stage purposes, inputs and outputs](docs/STAGES.md)
 - [Data model and stable identifiers](docs/DATA_MODEL.md)
 - [Reviewer instructions](docs/REVIEW_CARDS_COLLEAGUES.md)

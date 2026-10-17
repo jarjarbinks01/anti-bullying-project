@@ -35,6 +35,12 @@ def release_records(db) -> tuple[dict, dict]:
 def export_review(db, cfg: dict, path: Path, limit=500):
     release, records = release_records(db)
     cases = [json.loads(r[0]) for r in db.execute("SELECT payload_json FROM release_candidates WHERE release_id=? ORDER BY case_id", (release["release_id"],))]
+    from .review_dispatch import Router
+    router = Router(records, active_decisions(db))
+    # Keep legacy date/deduplication work and explicit quality checks, without
+    # reintroducing identity comparisons blocked by the shared dispatch rules.
+    cases = [c for c in cases if c['kind'] not in {'identity', 'family', 'respondent'}
+             or router.eligible(c, 'validation')]
     rng = random.Random(20261005)
     rng.shuffle(cases)
     # Include all cases with --limit 0. Default stratified sample distributes
@@ -96,6 +102,7 @@ def export_review(db, cfg: dict, path: Path, limit=500):
                            'SET_FIELD value: {"field":"student_PHQ_01","value":2}. It changes the standardized field, never the raw source.',
                            "Use NEW_RECORD for a single-record correction copied from submissions. Pair corrections use NEW.",
                            "Labels: MATCH, NONMATCH, UNRESOLVED. Label alone records validation, not an override.",
+                           "Identity comparisons exclude conflicting child birthdays/sex, untraceable contacts and evidence requiring correction. Correct source evidence before requesting a new identity review.",
                            "Use case_id NEW and kind identity/family for a missed pair; copy IDs/version IDs from submissions.",
                            "School actions: MAP or DELETE. Add reason and reviewer for every decision.",
                            "This workbook contains identifiers. Keep it within the research team's controlled storage.",
@@ -311,6 +318,11 @@ def validation_report(db, cases: list[dict], records: list[dict] | None = None) 
     for row in db.execute("SELECT * FROM labels"):
         c = indexed.get(row["case_id"])
         p = json.loads(row["payload_json"])
+        if p.get('group_review'):
+            # Group verdicts describe a set, not a single automatically proposed
+            # pair. Their explicit pair decisions retain the publication guard;
+            # group agreement/coverage is reported by the shared review service.
+            continue
         if not c and records_by_id and p.get("record_a") in records_by_id and p.get("record_b") in records_by_id:
             c = {**p, "status": "unmatched", "rule": "outside_candidate_search",
                  "version_a": records_by_id[p["record_a"]]["version_id"],

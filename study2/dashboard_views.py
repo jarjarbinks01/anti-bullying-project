@@ -32,7 +32,8 @@ COHORT_FLAGS = {
     "跨期親子樣本": "longitudinal_dyad", "同一孩子的家長跨期回應": "child_report_longitudinal",
 }
 SAFE_FIELDS = ["submission_id", "school", "grade", "source_type", "mainstream", "identity_rules",
-               "observed_at", "claimed_wave", "wave", "date_basis", "time_confidence"]
+               "observed_at", "claimed_wave", "wave", "date_basis", "time_confidence",
+               "student_parent_calendar_gap_days", "student_parent_elapsed_gap_days", "parent_response_interval_days"]
 SOURCE_NAMES = {"legacy_online": "舊線上系統", "paperform": "paperform", "qualtrics": "Qualtrics",
                 "school_batch": "學校批次", "socialworkdream": "Social Work Dream"}
 STAGE_PURPOSES = {
@@ -62,7 +63,12 @@ def stage_overview(summary):
                 quantity = "；".join(f"{name}：{value:,}" for name, value in count.items())
         else:
             quantity = f"{count:,} 份提交"
-        rows.append({"階段": stage, "主要目的": STAGE_PURPOSES.get(stage, "此版本未提供階段說明"), "數量／結果": quantity})
+        purpose = STAGE_PURPOSES.get(stage, "此版本未提供階段說明")
+        if stage == '2.1.5' and summary.get('parent_wave_policy'):
+            purpose = '學生保留最早T0及至少90日後的最新T1；家長按學生香港日期分輪，同輪處理重填'
+            if summary['parent_wave_policy'] == 'student_anchored_hk_nearest_v2':
+                purpose = '學生保留最早T0及至少90日後的最新T1；先保留家長T1，再選最接近學生T0的家長基線（可較早）'
+        rows.append({"階段": stage, "主要目的": purpose, "數量／結果": quantity})
     return pd.DataFrame(rows)
 
 
@@ -132,7 +138,10 @@ def sample_reconciliation(frame, parent_longitudinal, summary):
 def sample_display(rows, sample):
     labels = {"submission_id": "提交ID", "school": "學校", "grade": "年級", "source_type": "來源",
               "observed_at": "建立時間", "claimed_wave": "原始輪次", "wave": "選定輪次",
-              "date_basis": "日期依據", "time_confidence": "日期類別", "identity_rules": "孩子身份規則"}
+              "date_basis": "日期依據", "time_confidence": "日期類別", "identity_rules": "孩子身份規則",
+              "student_parent_calendar_gap_days": "距學生該輪日數（香港曆日）",
+              "student_parent_elapsed_gap_days": "家長減學生時間差（日）",
+              "parent_response_interval_days": "距家長T0日數（實際間隔）"}
     columns = ["child_id"]
     names = {"child_id": "孩子ID"}
     for field in labels:

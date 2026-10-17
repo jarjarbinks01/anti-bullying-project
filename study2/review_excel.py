@@ -22,6 +22,9 @@ NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 ET.register_namespace("", NS)
 STATUS = {'confirmed':'已確認','pending':'待審','rejected':'已拒絕','unmatched':'未配對'}
 RULES = {'exact_school_contact_child_demo':'同校、孩子生日及性別一致，聯絡資料精確相同',
+         'child_contact_bridge_component':'直接規則連通整組、孩子生日及性別一致，自動確認',
+         'child_group_contact_bridge':'群組聯絡連結核實，部分提交沒有直接共同聯絡',
+         'child_group_contact_gap':'群組尚有未連起的子群，需要核實缺少證據的連結',
          'one_digit_phone_school_child_demo':'同校、孩子生日及性別一致，電話只差一位數字',
          'exact_contact_school_transfer_child_demo':'學校不同，孩子生日、性別及聯絡資料精確相同',
          'fuzzy_contact_child_demo':'電話近似，孩子身份證據需要核實',
@@ -30,6 +33,10 @@ RULES = {'exact_school_contact_child_demo':'同校、孩子生日及性別一致
          'contact_missing_or_conflicting_child_demo':'共同聯絡，但孩子資料缺失或矛盾',
          'same_adult_reported_birth_relationship_personal_contact':'成人出生年份、關係及本人聯絡一致',
          'same_adult_reported_birth_relationship_general_contact_fallback':'本人聯絡缺失；成人年份、關係及其他精確聯絡一致',
+         'same_adult_reported_birth_personal_contact':'成人出生年份及任一本人電話／電郵一致',
+         'same_adult_reported_birth_any_exact_contact':'成人出生年份及任一聯絡欄精確電話／電郵一致',
+         'no_exact_adult_contact':'沒有任何精確相同的電話／電郵',
+         'different_child_identity':'兩份回應指向不同孩子',
          'adult_birth_year_missing_or_invalid':'成人出生年份缺失或不合法',
          'reported_birth_year_changed':'成人出生年份不同',
          'reported_relationship_changed':'與孩子關係不同',
@@ -131,7 +138,13 @@ def text_height(*values, minimum=30):
 
 def comparison(a, b):
     missing_a, missing_b = shown(a) == "缺失", shown(b) == "缺失"
-    return "兩方缺失" if missing_a and missing_b else "一方缺失" if missing_a or missing_b else "相同" if a == b else "不同"
+    if missing_a or missing_b:
+        return "兩方缺失" if missing_a and missing_b else "一方缺失"
+    if a == b:
+        return '相同'
+    if isinstance(a, list) and isinstance(b, list) and set(a) & set(b):
+        return '部分相同（有共同聯絡）'
+    return '不同'
 
 
 def fields(r, adult=False):
@@ -140,7 +153,7 @@ def fields(r, adult=False):
     result = [("問卷對象", "學生" if r["role"] == "student" else "家長"), ("學校", e.get("school")),
               ("孩子生日", e.get("dob")), ("孩子性別（原編碼）", e.get("gender")), ("年級（清理值）", e.get("grade")),
               ("年級（原始值）", r.get('grade_raw')),
-              ("現有班號／學號", e.get("roll")), ("聯絡資料", e.get("contacts"))]
+              ("現有班號／學號", e.get("roll")), ("聯絡資料", own.get('all_contacts', e.get('contacts')) if adult else e.get('contacts'))]
     if adult:
         result.extend([("成人出生年份", own["birth_year"]), ("與孩子關係", {"0":"父親 (0)", "1":"母親 (1)", "2":"其他 (2)"}.get(own["relationship"], own["relationship"])),
                        ("其他關係文字", own["other_relationship"]), ("本人聯絡資料", own["personal_contacts"])])
@@ -184,9 +197,12 @@ def write_package(package, path):
     xfs.set("count", str(len(xfs)))
     files["xl/styles.xml"] = ET.tostring(style_root, encoding="utf-8", xml_declaration=True)
     directory, cards, reference, system = [Sheet(styles) for _ in range(4)]
-    directory.merged(1, "Study 2｜逐宗身份審核", style=1, height=36)
+    purpose = package.get('purpose', 'review')
+    title = {'review':'逐宗身份審核', 'validation':'身份品質抽查', 'adjudication':'Jarvis 指定裁定'}.get(purpose, '逐宗身份審核')
+    has_groups = any(t['snapshot']['case'].get('group_review') for t in package['tasks'])
+    directory.merged(1, "Study 2｜" + title, style=1, height=36)
     directory.merged(2, "審核者：" + package["reviewer"] + "　｜　共 " + str(len(package["tasks"])) + " 宗", style=2)
-    directory.merged(3, "只填黃色格。填寫、儲存、交回同一份 .xlsx；毋須操作識別碼。", style=2)
+    directory.merged(3, "孩子群組先查看群組參考內全部 R 編號，再填三個黃色格。儲存並交回同一份 .xlsx。" if has_groups else "只填黃色格。填寫、儲存、交回同一份 .xlsx；毋須操作識別碼。", style=2)
     directory.merged(4, "三項必填：結論、主要證據來源、補充理由（包括證據位置）。", style=2)
     directory.merged(5, "資料不足不改目前配對。已填寫只表示答案齊備，仍待 Jarvis 批准。", style=2)
     directory.merged(6, "原始輪次及選定輪次分開列出。親子填卷日期差不作拒配條件。", style=2)
@@ -197,7 +213,7 @@ def write_package(package, path):
     directory.rows[9].find(f'{tag("c")}[@r="B9"]/{tag("v")}').text='0 / '+str(len(package['tasks']))+' 宗已填寫'
     directory.line(11, ["個案", "類型及問題", "審核者", "填寫狀態"], style=3)
     reference.merged(1, "群組參考｜必要的其他提交及程式原判斷", style=1, height=36)
-    reference.merged(2, "先比較審核卡，再按需要查閱這裡。獨立重審不顯示他人答案。", style=2)
+    reference.merged(2, "群組卡須核對本宗全部 R 編號及連結表，再作一次整組判斷。獨立重審不顯示他人答案。" if has_groups else "先比較審核卡，再按需要查閱這裡。獨立重審不顯示他人答案。", style=2)
     reference.merged(3, "資料來源：" + package["release_id"] + " 的標準化提交及候選快照", style=10)
     system.line(1, ["格式版本", "工作包", "審核者", "原發布版本"], style=3)
     system.line(2, [package["format_version"], package["package_id"], package["reviewer"], package["release_id"]])
@@ -213,13 +229,19 @@ def write_package(package, path):
             a, b = sorted([a,b], key=lambda r: (r.get("observed_at") or "9999", r["submission_id"]))
         number = index+1
         question = "這兩份問卷是否由同一成人填寫？" if case["kind"] == "respondent" else "這兩份問卷是否指向同一孩子？"
-        cards.merged(start, f"個案 {number:02d}｜{KINDS[case['kind']]}", style=1, height=36)
+        group = case.get('group_review')
+        if group:
+            question = f"群組參考內全部 {len(group['members'])} 份問卷，是否指向同一孩子？"
+        cards.merged(start, f"個案 {number:02d}｜" + ('孩子身份群組' if group else KINDS[case['kind']]), style=1, height=36)
         cards.merged(start+1, question, style=2)
         cards.merged(start+2, "返回審核目錄", "A", "B", style=9)
         cards.hyperlink(f"A{start+2}", "'審核目錄'!A"+str(11+number))
         cards.merged(start+2, "下一宗" if number < len(package["tasks"]) else "返回目錄", "C", "D", style=9)
         cards.hyperlink(f"C{start+2}", "'審核卡'!A"+str(start+40) if number<len(package["tasks"]) else "'審核目錄'!A1")
-        cards.line(start+3, ["比較項目", "學生" if case["kind"]=="family" else "較早提交／左方", "家長" if case["kind"]=="family" else "較後提交／右方", "比較提示"], style=3)
+        node_labels = {sid: f'R{i+1:03d}' for i, sid in enumerate(sorted(snapshot['records']))}
+        cards.line(start+3, ["缺口代表比較" if group else "比較項目",
+                            node_labels[a['submission_id']] if group else "學生" if case["kind"]=="family" else "較早提交／左方",
+                            node_labels[b['submission_id']] if group else "家長" if case["kind"]=="family" else "較後提交／右方", "比較提示"], style=3)
         for offset, ((label, av), (_, bv)) in enumerate(zip(fields(a,case["kind"]=="respondent"), fields(b,case["kind"]=="respondent"))):
             r = start+4+offset
             comp = comparison(av,bv)
@@ -230,7 +252,17 @@ def write_package(package, path):
                                     '成人出生年份','與孩子關係','其他關係文字','本人聯絡資料'}
             cards.cell("D"+str(r), comp, (5 if comp=="相同" else 12 if comp=="不同" else 13) if identity_field else 8, height=height)
         for blank in range(start+4+len(fields(a,case['kind']=='respondent')),start+27):
+            if group and blank >= start+25:
+                continue
             cards.row(blank,height=8)
+        if group:
+            message = (f"全組 {len(group['members'])} 份；{len(group['passed_pairs'])} 對已通過直接規則，毋須重審。\n"
+                       + case['reason'] + '。先開啟群組參考；上方兩份只代表證據缺口。')
+            if 'unresolved_pairs' in group:
+                message += f"\n只核實子群之間的連結；{len(group['unresolved_pairs'])} 對尚未確認同一孩子。"
+            cards.merged(start+25, message, style=2, height=text_height(message, minimum=66))
+            cards.merged(start+26, '開啟全組提交及待判斷連結', style=9)
+            cards.hyperlink('A'+str(start+26), "'群組參考'!A"+str(rr))
         cards.cell("A"+str(start+27), "審核結論", 3)
         cards.merged(start+27, None, "B", "D", style=11)
         cards.validations.append(("B"+str(start+27), list(VERDICTS)))
@@ -244,6 +276,10 @@ def write_package(package, path):
         cards.cell("A"+str(start+31), "填寫狀態", 3)
         cards.merged(start+31, formula, "B", "D", style=8, formula=True)
         warnings = case.get("review_warnings", [])
+        verification = (group or {}).get('verification_source') or snapshot.get('verification_source')
+        if verification:
+            warnings = list(warnings) + ['本次核實問題：'+verification['question'],
+                '已登記來源：'+verification['source']+'；位置：'+verification['reference']]
         if warnings:
             message = "審核提示（不代表拒配）：\n" + "\n".join(warnings)
             cards.merged(start+32, message, style=13, height=text_height(message, minimum=48))
@@ -252,22 +288,56 @@ def write_package(package, path):
         cards.merged(start+34, "資料有錯請在理由註明，交 Jarvis 使用既有修正工具處理。", style=10)
         cards.merged(start+35, "已填寫並不代表已批准。請勿移動、刪除或修改卡片。", style=10)
         inputs[task["task_id"]] = {"verdict": v, "evidence_source": e, "reason": reason}
-        directory.line(11+number, [f"開啟個案 {number:02d}", KINDS[case["kind"]], package["reviewer"]], style=9)
+        directory.line(11+number, [f"開啟個案 {number:02d}", '孩子身份群組' if group else KINDS[case["kind"]], package["reviewer"]], style=9)
         directory.cell("D"+str(11+number), f"='審核卡'!B{start+31}", style=8, formula=True)
         directory.hyperlink("A"+str(11+number), "'審核卡'!A"+str(start))
         system.line(5+index*2, [task["task_id"]+" / "+str(task['revision']), case["case_id"], snapshot["signature"], ", ".join((v,e,reason))],height=60)
         system.line(6+index*2, [case['record_a'],case['record_b'],case['version_a'],case['version_b']],height=60)
         reference.merged(rr, f"個案 {number:02d}｜{case['case_id']}", style=3, height=36)
         reference.merged(rr+1, f"程式原判斷：{STATUS.get(case['status'],case['status'])}　規則：{RULES.get(case['rule'],case['rule'])}\n規則代號：{case['rule']}", style=10, height=60)
-        reference.merged(rr+2, "程式理由："+case.get("reason", ""), style=10, height=50)
+        source_note = '程式理由：'+case.get('reason','')
+        if verification:
+            source_note += '\n核實問題：'+verification['question']+'\n核實來源：'+verification['source']+'；位置：'+verification['reference']
+        reference.merged(rr+2, source_note, style=10, height=text_height(source_note,minimum=50))
+        node_names = {sid: f'R{i+1:03d}' for i, sid in enumerate(sorted(snapshot['records']))}
         reference.line(rr+3, ["相關提交 ID", "身份資料", "輪次／來源位置", "群組／狀態"], style=3)
         rr += 4
         for sid, rec in snapshot["records"].items():
             loc=rec.get("location") or {}
-            reference.line(rr, [sid, "學校："+shown(rec.get("school"))+"\n生日："+shown(rec.get("dob"))+"；性別："+shown(rec.get("gender"))+"\n聯絡："+shown(rec["child_evidence"]["contacts"]),
-                           "原始："+shown(rec.get("claimed_wave"))+"；選定："+shown(rec.get("selected_wave"))+"\n"+shown(loc),
-                           shown(rec.get("child_id"))+"\n"+shown(rec.get("status"))], height=90)
+            identity = ("學校："+shown(rec.get("school"))+"\n生日："+shown(rec.get("dob"))+"；性別："+shown(rec.get("gender"))
+                        + ('\n'+('學生' if rec['role']=='student' else '家長')+'；年級：'+shown(rec.get('grade')) if group else '')
+                        +"\n聯絡："+shown(rec["child_evidence"]["contacts"]))
+            provenance = ("原始："+shown(rec.get("claimed_wave"))+"；選定："+shown(rec.get("selected_wave"))
+                          + ('\n建立時間：'+shown(rec.get('observed_at'))+'\n日期依據：'+shown(rec.get('date_basis')) if group else '')
+                          +"\n"+shown(loc))
+            reference.line(rr, [(node_names[sid]+'\n' if group else '')+sid, identity, provenance,
+                           shown(rec.get("child_id"))+"\n"+shown(rec.get("status"))],
+                           height=text_height(identity,provenance,minimum=90) if group else 90)
             rr += 1
+        if group:
+            for i, component in enumerate(group.get('contact_components', []), 1):
+                child_ids = {snapshot['records'][sid].get('child_id') for sid in component}
+                status = ('孤立提交，沒有組內聯絡連結' if len(component) == 1 else
+                          '已確認子群，毋須重審內部連結' if len(child_ids) == 1 and None not in child_ids else
+                          '聯絡連通，須保留既有身份限制')
+                reference.line(rr, [f'SG{i:03d}', '、'.join(node_names[sid] for sid in component),
+                                    status, '只核實與其他子群的連結'], style=2, height=60)
+                rr += 1
+            reference.merged(rr, '本宗判斷範圍：全部 R 編號。確認不同請在理由列出分組，例如 R001、R003 一組；R002 另一組。', style=2, height=55)
+            rr += 1
+            reference.line(rr, ['提交一','提交二','連結證據','需要判斷甚麼'], style=3)
+            rr += 1
+            for pair in group['passed_pairs'] + group['missing_pairs']:
+                passed = bool(pair['rule'])
+                left, right = (snapshot['records'][pair[side]] for side in ('a','b'))
+                confirmed = bool(left.get('child_id') and left['child_id'] == right.get('child_id'))
+                reference.line(rr, [node_names[pair['a']],node_names[pair['b']],
+                                    RULES.get(pair['rule'], pair['rule']) if passed else
+                                    '已確認子群內的間接連結' if confirmed else '沒有直接符合聯絡規則的證據',
+                                    '已確認，毋須逐對重審' if confirmed else '已通過直接規則，毋須逐對重審' if passed else
+                                    '只核實跨子群連結；欠證據不等於已確認不同孩子'],
+                               style=5 if passed or confirmed else 13,height=60)
+                rr += 1
         reference.merged(rr, "相關候選（永久 ID 不因左右顯示次序改變）", style=3)
         rr += 1
         for c in snapshot["candidates"]:

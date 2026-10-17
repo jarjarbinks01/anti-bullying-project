@@ -43,7 +43,10 @@ def initialize(project: Path, config_path: Path, state: Path | None = None, sour
                    release_dir=str(PACKAGE_ROOT / "releases/merged"), inbox_dir=str(PACKAGE_ROOT / "inbox/merged"),
                    date_policy="current_creation_time_user_accepted_20261006",
                    matching_policy={"allow_one_digit_phone": True, "allow_school_transfer": True,
-                                    "allow_exact_general_contact_when_personal_missing": True},
+                                    "allow_contact_bridge_components": True,
+                                    "allow_contact_subgroups": True,
+                                    "adult_contact_scope": "any_exact"},
+                   parent_wave_policy="student_anchored_hk_nearest_v2",
                    bd_requires_same_adult=True)
     for role in ["student", "parent"]:
         for wave in ["T0", "T1"]:
@@ -150,6 +153,15 @@ def main():
     cards.add_argument("--case-id", action="append")
     cards.add_argument("--independent", action="store_true")
     cards.add_argument("--replaces", help="只重新指派尚未交回答案的工作包")
+    cards.add_argument('--purpose', choices=['review', 'validation', 'adjudication'], default='review',
+                       help='review：一般待審；validation：另行品質抽查；adjudication：Jarvis 成人裁定')
+    evidence = sub.add_parser('review-evidence-add',help='Jarvis 登記可核實來源及具體問題，不寫入配對裁定')
+    evidence.add_argument('--case-id',required=True)
+    evidence.add_argument('--source',choices=['原始紙本','既有收集紀錄','其他已核實來源'],required=True)
+    evidence.add_argument('--reference',required=True)
+    evidence.add_argument('--question',required=True)
+    waiting = sub.add_parser('review-waiting-export',help='唯讀匯出證據不足的固定版本 SQLite 資料集')
+    waiting.add_argument('--output',required=True,type=Path)
     receive = sub.add_parser("review-receive", help="保存答案，不改正式配對")
     receive.add_argument("workbook", type=Path)
     preview = sub.add_parser("review-preview")
@@ -166,10 +178,12 @@ def main():
     resolve.add_argument("--review-id", required=True)
     resolve.add_argument("--reason", required=True)
     resolve.add_argument("--output", type=Path)
+    resolve.add_argument('--group-partition', type=Path, help='Jarvis 裁定的完整提交分組 JSON')
     reopen = sub.add_parser("review-reopen")
     reopen.add_argument("task_id", nargs="+")
     reopen.add_argument("--reason", required=True)
     sub.add_parser("review-report")
+    sub.add_parser('review-queue', help='查閱已過濾的一般身份審核工作量')
     sub.add_parser("review-console", help="中文執行者操作選單")
     sub.add_parser("dyad-console", help="永久親子追蹤中心，不發送訊息")
     dyad_preview = sub.add_parser("dyad-preview", help="唯讀預覽登記及衝突")
@@ -273,14 +287,22 @@ def main():
                                 result = {'bundle':operator.backup_tracking(db, cfg, 'operator')}
                             finally:
                                 db.close()
-            elif args.command in {"review-cards", "review-receive", "review-preview", "review-approve", "review-apply", "review-resolve", "review-report", "review-reopen", "review-console"}:
+            elif args.command in {"review-cards", "review-receive", "review-preview", "review-approve", "review-apply", "review-resolve", "review-report", "review-queue", "review-reopen", "review-console", 'review-evidence-add', 'review-waiting-export'}:
                 from . import review_core as core
                 from . import review_operator as operator
                 if args.command == "review-cards":
                     package = core.create_package(cfg, args.reviewer, args.output, args.limit, args.kind,
-                                                  args.case_id, args.independent, args.replaces)
+                                                  args.case_id, args.independent, args.replaces, purpose=args.purpose)
                     result = {"package_id": package["package_id"], "reviewer": package["reviewer"],
                               "cases": len(package["tasks"]), "output": str(args.output.resolve())}
+                elif args.command == 'review-queue':
+                    from .review_dispatch import queue_snapshot
+                    result = queue_snapshot(cfg)
+                elif args.command == 'review-evidence-add':
+                    result = core.register_review_evidence(cfg,args.case_id,args.source,args.reference,args.question)
+                elif args.command == 'review-waiting-export':
+                    from .review_dispatch import export_waiting_dataset
+                    result = export_waiting_dataset(cfg,args.output)
                 elif args.command == "review-receive":
                     from .review_excel import import_package
                     result = import_package(cfg, args.workbook)
@@ -293,7 +315,8 @@ def main():
                 elif args.command == "review-apply":
                     result = core.apply_batch(cfg, args.batch_id)
                 elif args.command == "review-resolve":
-                    result = operator.resolve(cfg, args.batch_id, args.case_id, args.review_id, args.reason)
+                    partition = json.loads(args.group_partition.read_text()) if args.group_partition else None
+                    result = operator.resolve(cfg, args.batch_id, args.case_id, args.review_id, args.reason, group_partition=partition)
                     if args.output:
                         operator.write_preview(result, args.output)
                 elif args.command == "review-reopen":

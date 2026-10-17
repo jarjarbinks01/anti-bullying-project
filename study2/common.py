@@ -75,10 +75,11 @@ def phone(value: Any) -> str:
     return s if re.fullmatch(r"[0-9]{8}", s) else ""
 
 
-def contacts(answer: dict) -> set[str]:
+def contacts(answer: dict, *, extended_separators: bool = False) -> set[str]:
     found = set()
+    separator = r"[/;,；，\r\n]+" if extended_separators else r"[/;,]"
     for name in ["contact_01", "contact_02", "contact_03.1", "contact_03.2", "contact_03.3", "contact_03.4"]:
-        for part in re.split(r"[/;,]", text(answer.get(name))):
+        for part in re.split(separator, text(answer.get(name))):
             p = phone(part)
             if p:
                 found.add(p)
@@ -121,6 +122,8 @@ def load_config(path: Path) -> dict:
         raise PipelineError("Live state/database must be outside a synchronized drive")
     if cfg["minimum_followup_days"] < cfg["duplicate_days"]:
         raise PipelineError("Follow-up interval cannot be shorter than the duplicate interval")
+    from .parent_waves import validate_policy
+    validate_policy(cfg.get('parent_wave_policy'))
     return cfg
 
 
