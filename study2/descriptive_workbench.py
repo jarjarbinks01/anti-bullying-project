@@ -6,7 +6,7 @@ import pandas as pd
 from .descriptive_charts import category_chart, distribution_chart, subgroup_chart, transition_chart
 from .descriptive_exploration import VERSION, comparison_variables, explore, mode_of, scale_display
 from .descriptive_spec import GROUPS, STATUS_LABELS, variables
-from .descriptives import display_table, statistics
+from .descriptives import adult_continuity_confirmed, display_table, statistics
 
 
 DETAIL_FAMILIES = {
@@ -201,7 +201,7 @@ def _availability(st,stats):
 
 def render_workbench(rows,role,release_id,*,prefix,metadata=None):
     import streamlit as st
-    options=comparison_variables(mode_of(rows),role)
+    options=comparison_variables(mode_of(rows),role,rows)
     if not options:
         st.info('先選擇正式跨期樣本，才可比較同一批單位。')
         return
@@ -218,8 +218,8 @@ def render_workbench(rows,role,release_id,*,prefix,metadata=None):
     missing=pairs[['group_label','pairs_n','paired_valid_n','only_t0_valid_n','only_t1_valid_n','both_missing_n']]
     st.dataframe(missing.rename(columns={'group_label':'分組','pairs_n':'正式配對 N','paired_valid_n':'兩輪均有效 N',
         'only_t0_valid_n':'只有 T0 有效','only_t1_valid_n':'只有 T1 有效','both_missing_n':'兩輪均缺失'}),hide_index=True,width='stretch')
-    if role=='parent' and mode_of(rows) not in {'acbd','independent_same_adult'}:
-        st.info('此分支確認同一孩子，填卷成人可能不同。成人 PHQ 選項已移除；成人變化請選 BD 或獨立同一成人分支。')
+    if role=='parent' and not adult_continuity_confirmed(rows):
+        st.info('目前樣本未有完整的同一成人確認證據，PHQ 跨期比較已停用。各輪 PHQ 描述統計仍可查看。')
     st.caption(scale_display(var)['direction']+'；只作描述，不代表臨床改善或研究造成的效果。')
     if view=='T0／T1 分布':
         histogram=(st.radio('分布圖',['箱形圖','直方圖'],horizontal=True,key=prefix+'_distribution')=='直方圖'

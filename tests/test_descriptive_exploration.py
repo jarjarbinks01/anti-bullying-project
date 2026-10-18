@@ -85,7 +85,11 @@ def test_category_bands_no_numeric_delta_and_adult_phq_guard():
         with pytest.raises(PipelineError,match='unavailable'):
             explore(panel([1],[2],mode),'parent',paired=True,selected_variables=['PHQ_total'])
     for mode in ['acbd','independent_same_adult']:
-        assert any(v.key=='PHQ_total' for v in comparison_variables(mode,'parent'))
+        rows = panel([0], [12], mode)
+        assert not any(v.key=='PHQ_total' for v in comparison_variables(mode,'parent',rows))
+        rows['adult_continuity_confirmed'] = True
+        assert any(v.key=='PHQ_total' for v in comparison_variables(mode,'parent',rows))
+        assert explore(rows,'parent',paired=True,selected_variables=['PHQ_total'])['pair_summary'].iloc[0]['mean_change']==12
 
 
 @pytest.mark.parametrize('corrupt',['duplicate','missing','same_submission','null','unknown_wave','wrong_mode'])
@@ -251,3 +255,30 @@ def test_exploration_failure_preserves_publication_and_missing_file_blocks_publi
     (folder/'descriptive_pair_summary.parquet').unlink()
     with pytest.raises((PipelineError,FileNotFoundError)):verify_release(db,first['release_id'])
     db.close()
+
+
+def test_parent_fallback_cannot_authorize_phq_changes_or_fixed_workbook(inputs):
+    from study2.descriptives import paired_changes, statistics
+    from study2.descriptive_reports import workbook_bytes
+    frame, parents, measurements, _ = inputs
+    frame.loc[frame['wave'].eq('T1'), 'PHQ_total'] = 12
+    rows = cohort(frame, None, measurements, 'acbd', 'parent')
+    assert not rows['adult_continuity_confirmed'].any()
+    for key in ['PHQ_total', 'PHQ_anxiety', 'PHQ_depression', 'phq_band']:
+        with pytest.raises(PipelineError, match='unavailable'):
+            explore(rows, 'parent', paired=True, selected_variables=[key])
+    changes = paired_changes(rows, 'parent')
+    assert not changes['variable_id'].str.startswith('PHQ_').any()
+    assert 'FQOL_total' in set(changes['variable_id'])
+    stats = statistics(rows, 'parent')
+    assert 'PHQ_total' in set(stats['variable_id'])
+    book = load_workbook(io.BytesIO(workbook_bytes(stats, changes, 'acbd', 'test')))
+    # Both summary and export use the guarded shared changes table.
+    change_sheet = book['配對差'] if '配對差' in book.sheetnames else None
+    assert change_sheet is not None
+    assert not any(str(c.value).startswith('PHQ_') for row in change_sheet for c in row)
+    confirmed = cohort(frame, parents, measurements, 'acbd', 'parent')
+    assert any(v.key == 'PHQ_total' for v in comparison_variables('acbd', 'parent', confirmed))
+    confirmed['adult_continuity_confirmed'] = confirmed['adult_continuity_confirmed'].astype('boolean')
+    confirmed.loc[confirmed.index[0], 'adult_continuity_confirmed'] = pd.NA
+    assert not any(v.key == 'PHQ_total' for v in comparison_variables('acbd', 'parent', confirmed))

@@ -55,6 +55,10 @@ def cohort(frame, parent_frame, measurements, mode, role):
                          & frame['longitudinal_dyad'].fillna(False)].copy()
         students = attach_measurements(students, measurements)
         result = _anchor_rows(rows, students, ['child_id'])
+    # Only the dedicated confirmed-adult artifact establishes BD continuity.
+    # The ordinary parent fallback establishes child identity only.
+    result['adult_continuity_confirmed'] = bool(
+        role == 'parent' and mode == 'acbd' and parent_frame is not None)
     result['report_mode'] = mode
     result['grouping_anchor'] = ('該輪回應' if mode == 'abcd' else '該輪學生' if mode == 'ef'
                                  else '學生T0' if mode == 'efmatched' or role == 'student' else 'BD家長T0所指孩子')
@@ -74,6 +78,9 @@ def independent_cohort(frame, measurements, branch, paired_only=True):
     if rows.duplicated(['child_id', 'wave']).any():
         raise PipelineError('Independent report membership is not unique')
     result = _anchor_rows(rows, rows[rows['wave'].eq('T0')], ['child_id'])
+    result['adult_continuity_confirmed'] = (
+        result['panel_longitudinal'].fillna(False).astype(bool)
+        if branch == 'same_adult' else False)
     result['report_mode'] = 'independent_' + branch
     result['grouping_anchor'] = '獨立家長T0所指孩子'
     result = result.sort_values(['child_id', 'wave']).reset_index(drop=True)
@@ -181,6 +188,21 @@ def statistics(rows, role, groups=('all',), release_id='', section=None):
     return result
 
 
+def adult_continuity_confirmed(rows):
+    """Fail closed without explicit cohort evidence for every displayed response.
+
+    A mode name or same-child membership alone cannot authorize adult PHQ
+    changes. Conservatively suppress them for the entire selected cohort if
+    any response lacks confirmation, rather than silently changing its N.
+    """
+    if rows is None or rows.empty or 'adult_continuity_confirmed' not in rows:
+        return False
+    if 'report_mode' not in rows or not rows['report_mode'].isin(
+            ['acbd', 'independent_same_adult']).all():
+        return False
+    return bool(rows['adult_continuity_confirmed'].eq(True).fillna(False).all())
+
+
 def paired_changes(rows, role, groups=('all',), release_id=''):
     mode = rows['report_mode'].iloc[0] if len(rows) else rows.attrs.get('mode', '')
     permitted = mode in {'acbd', 'efmatched', 'independent_same_adult', 'independent_child_report'}
@@ -194,7 +216,7 @@ def paired_changes(rows, role, groups=('all',), release_id=''):
         for var in variables(role, 'scales'):
             if var.kind != 'continuous':
                 continue
-            if role == 'parent' and var.key.startswith('PHQ_') and mode != 'acbd' and mode != 'independent_same_adult':
+            if role == 'parent' and var.key.startswith('PHQ_') and not adult_continuity_confirmed(rows):
                 continue
             a, _ = values_and_status(first.loc[units], var)
             b, _ = values_and_status(last.loc[units], var)

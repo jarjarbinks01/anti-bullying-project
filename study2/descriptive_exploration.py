@@ -11,7 +11,7 @@ import pandas as pd
 
 from .common import PipelineError
 from .descriptive_spec import GROUPS, variables
-from .descriptives import group_rows, values_and_status
+from .descriptives import adult_continuity_confirmed, group_rows, values_and_status
 
 VERSION = 'study2_exploration_v1'
 PAIRED_MODES = {'acbd', 'efmatched', 'independent_same_adult', 'independent_child_report'}
@@ -36,10 +36,10 @@ def mode_of(rows):
     return rows['report_mode'].iloc[0] if len(rows) else rows.attrs.get('mode', '')
 
 
-def comparison_variables(mode, role):
+def comparison_variables(mode, role, rows=None):
     if mode not in PAIRED_MODES:
         return []
-    same_adult = mode in {'acbd', 'independent_same_adult'}
+    same_adult = adult_continuity_confirmed(rows)
     return [v for v in variables(role, 'scales')
             if not (role == 'parent' and not same_adult and (v.key.startswith('PHQ_') or v.key == 'phq_band'))]
 
@@ -121,7 +121,7 @@ def explore(rows, role, groups=('all',), release_id='', *, paired=False, selecte
         raise PipelineError('Exploration cannot mix sample modes or grouping anchors')
     if paired and mode not in PAIRED_MODES:
         raise PipelineError('This sample is not a formal longitudinal cohort')
-    allowed = comparison_variables(mode, role) if paired else variables(role)
+    allowed = comparison_variables(mode, role, rows) if paired else variables(role)
     requested = set(selected_variables) if selected_variables is not None else {v.key for v in allowed}
     if requested - {v.key for v in allowed}:
         raise PipelineError('Variable is unavailable for this role or paired sample')
