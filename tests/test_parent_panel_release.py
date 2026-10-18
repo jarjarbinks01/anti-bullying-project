@@ -81,6 +81,51 @@ def test_empty_parent_release_has_valid_schema_and_no_dashboard_filter_errors(pr
     assert available(Path(cfg['release_dir']) / summary['release_id'], summary)
 
 
+def test_collapsed_adult_nonmatch_cannot_publish_a_same_person_phq_change(project):
+    from study2.respondents import adult_evidence
+    from test_identity_and_time import rec
+    cfg, _, rows, _ = project
+    cfg.update(parent_wave_policy=POLICY, bd_requires_same_adult=True,
+               matching_policy={'allow_contact_bridge_components': True})
+    template = copy.deepcopy(rows[2])
+    rows.clear()
+    for sid, day, number in [('base', 0, '61234567'), ('day90', 90, '61234567'),
+                             ('day100', 100, '61234567'), ('day130', 130, '63456789')]:
+        row = copy.deepcopy(template)
+        row.update(submission_id=sid, source_key=sid, version_id='version_'+sid,
+                   raw_hash='version_'+sid, observed_at=rec(sid, day)['observed_at'])
+        row['answer'].update(adult_demographics_05=1980, contact_01=number)
+        if sid in {'base', 'day100'}:
+            row['answer']['contact_02'] = '63456789'
+        for i in range(1, 5):
+            row['answer'][f'parent_PHQ_{i:02d}'] = 3 if sid == 'day130' else 0
+        rows.append(row)
+    a, b = rows[1], rows[3]
+    payload = dict(action='UNLINK_ADULT', target_key='adult:day90:day130',
+                   record_a=a['submission_id'], record_b=b['submission_id'],
+                   version_a=a['version_id'], version_b=b['version_id'],
+                   evidence_a=adult_evidence(a), evidence_b=adult_evidence(b))
+    db = connect(Path(cfg['state_dir']))
+    with db:
+        db.execute('INSERT INTO decisions VALUES(?,?,?,?,?,?)',
+                   ('synthetic_nonmatch', utcnow(), 'Synthetic reviewer',
+                    'Different adults', dumps(payload), None))
+    db.close()
+    summary = execute(project)
+    assert summary['independent_parent']['child_report_pairs'] == 1
+    assert summary['independent_parent']['same_adult_pairs'] == 0
+    assert summary['independent_parent']['experiment_pairs'] == 0
+    folder = Path(cfg['release_dir']) / summary['release_id']
+    data = read_panel(folder)
+    assert data['pairs'].query("panel_branch == 'same_adult'").empty
+    assert data['audit'].set_index('submission_id').loc['day90', 'duplicate_of'] == 'day100'
+    changes = pd.read_parquet(folder/'descriptive_pair_summary.parquet')
+    assert changes.query("mode == 'independent_same_adult' and variable_id == 'PHQ_total'")['paired_valid_n'].sum() == 0
+    assert data['analysis'].query("panel_branch == 'child_report' and panel_wave == 'T1'")['PHQ_total'].iloc[0] == 12
+    workbook = pd.read_excel(folder/'independent_parent.xlsx', sheet_name='正式跨期樣本')
+    assert not workbook['panel_branch'].eq(ADULT).any()
+
+
 def test_dashboard_widget_roundtrip_and_empty_filter(project):
     from streamlit.testing.v1 import AppTest
     cfg, _, rows, _ = project

@@ -119,7 +119,29 @@ def _collapse_repeats(rows, baseline, classify, audit, duplicate_days):
             target = audit[target]["duplicate_of"]
         if target:
             item["duplicate_of"] = target
-    return kept
+    return kept, {r['submission_id']: clusters[r['submission_id']] for r in kept}
+
+
+def _with_repeat_constraints(classify, clusters):
+    """Retain original restrictions without requiring new direct contact edges.
+
+    Representatives still use the existing adult evidence rules. A collapsed
+    member can veto a link through a rejection or reopened manual decision;
+    missing direct contact alone does not create an additional veto.
+    Pair-specific reviewed exceptions remain inside classify_adult.
+    """
+    def checked(a, b):
+        status, rule = classify(a, b)
+        if status != 'confirmed':
+            return status, rule
+        for left in clusters[a['submission_id']]:
+            for right in clusters[b['submission_id']]:
+                member_status, member_rule = classify(left, right)
+                if member_status == 'rejected' or member_rule == 'adult_decision_reopened':
+                    return 'pending', 'collapsed_repeat_' + member_rule
+        return status, rule
+
+    return checked
 
 
 def _unique_latest(rows):
@@ -174,7 +196,9 @@ def build_parent_panel(records, children, decisions=(), *, matching_policy=None,
                 audit[r["submission_id"]]["panel_status"] = "ambiguous_baseline_timestamp"
             continue
         baselines.append({"child_id": child, "t0": baseline["submission_id"]})
-        kept = _collapse_repeats(rows, baseline, classify, audit, duplicate_days)
+        kept, clusters = _collapse_repeats(rows, baseline, classify, audit, duplicate_days)
+        exact_classify = _with_repeat_constraints(classify, clusters)
+        experiment_classify = _with_repeat_constraints(shadow_classify, clusters)
         eligible = [r for r in kept if timestamp(r["observed_at"]) - timestamp(baseline["observed_at"])
                     >= timedelta(days=followup_days)]
         general, general_issue = _unique_latest(eligible)
@@ -184,8 +208,8 @@ def build_parent_panel(records, children, decisions=(), *, matching_policy=None,
                                          "confirmed", "Existing confirmed child membership; independent parent waves"))
         exact_matches, experiment_matches, case_rows = [], [], {}
         for later in eligible:
-            status, rule = classify(baseline, later)
-            exp_status, exp_rule = shadow_classify(baseline, later)
+            status, rule = exact_classify(baseline, later)
+            exp_status, exp_rule = experiment_classify(baseline, later)
             case = candidate(baseline, later, "respondent", rule, status, "Independent parent adult continuity")
             experiment = dict(case, status=exp_status, rule=exp_rule)
             if status == "confirmed":
@@ -198,8 +222,8 @@ def build_parent_panel(records, children, decisions=(), *, matching_policy=None,
                     "experiment_rule": exp_rule, "one_digit_candidate": exp_rule == "experimental_adult_one_digit_phone"}
             comparisons.append(item)
             case_rows[later["submission_id"]] = (item, case, experiment)
-        exact_matches = _consistent_adult_matches(baseline, exact_matches, state[0], classify)
-        experiment_matches = _consistent_adult_matches(baseline, experiment_matches, state[0], shadow_classify)
+        exact_matches = _consistent_adult_matches(baseline, exact_matches, state[0], exact_classify)
+        experiment_matches = _consistent_adult_matches(baseline, experiment_matches, state[0], experiment_classify)
         adult, adult_issue = _unique_latest([r for r, _ in exact_matches])
         if eligible and not exact_matches:
             adult_issue = "adult_identity_unconfirmed_or_conflicting"

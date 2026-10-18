@@ -144,6 +144,81 @@ def test_whole_adult_group_prevents_contact_chain_union():
     assert all(r["exact_status"] == "pending" for r in result.comparisons)
 
 
+def repeat_contact_bridge():
+    rows = [parent('base'), parent('day90', 90), parent('day100', 100),
+            parent('day130', 130, phone_value='63456789')]
+    for row in (rows[0], rows[2]):
+        row['answer']['contact_02'] = '63456789'
+    return rows
+
+
+def test_collapsed_missing_contact_does_not_add_a_new_pairwise_requirement():
+    rows = repeat_contact_bridge()
+    result = panel(rows)
+    assert next(r for r in result.audit if r['submission_id'] == 'day90')['duplicate_of'] == 'day100'
+    assert result.adult_pairs[0]['t1'] == 'day130'
+    assert result.child_pairs[0]['t1'] == 'day130'
+    # Existing retained-profile checks still apply; this fix does not relax them.
+    rows[1]['manual_keep'] = True
+    assert panel(rows).adult_pairs == []
+
+
+def test_collapsed_manual_nonmatch_is_not_bypassed_by_a_contact_bridge():
+    rows = repeat_contact_bridge()
+    decision = adult_decision(rows[1], rows[3])
+    before = copy.deepcopy((rows, decision))
+    children = {r['submission_id']: 'confirmed_child' for r in rows}
+    result = build_parent_panel(rows, children, [decision], matching_policy=POLICY)
+    assert result.adult_pairs == result.shadow_pairs == []
+    assert result.child_pairs[0]['t1'] == 'day130'
+    assert next(r for r in result.audit if r['submission_id'] == 'day90')['duplicate_of'] == 'day100'
+    assert all(r['exact_status'] == 'pending' for r in result.comparisons)
+    assert (rows, decision) == before
+    assert build_parent_panel(rows[::-1], children, [decision], matching_policy=POLICY) == result
+
+
+def test_protected_baseline_repeat_cluster_preserves_manual_nonmatch():
+    rows = [parent('base'), parent('early', 10), parent('later', 100)]
+    result = panel(rows, [adult_decision(rows[1], rows[2])])
+    assert next(r for r in result.audit if r['submission_id'] == 'early')['duplicate_of'] == 'base'
+    assert result.adult_pairs == result.shadow_pairs == []
+    assert result.child_pairs[0]['t1'] == 'later'
+    assert result.comparisons[0]['exact_rule'] == 'collapsed_repeat_reviewer_rejected_same_adult'
+
+
+def test_repeatedly_collapsed_cluster_keeps_oldest_manual_restriction():
+    rows = [parent('base'), parent('day90', 90), parent('day100', 100),
+            parent('day110', 110), parent('day140', 140)]
+    result = panel(rows, [adult_decision(rows[1], rows[-1])])
+    audit = {r['submission_id']: r for r in result.audit}
+    assert audit['day90']['duplicate_of'] == audit['day100']['duplicate_of'] == 'day110'
+    assert result.adult_pairs == result.shadow_pairs == []
+    assert result.child_pairs[0]['t1'] == 'day140'
+
+
+def test_pair_specific_year_exception_does_not_hide_collapsed_year_conflict():
+    rows = [parent('base'), parent('day90', 90, year=1981), parent('day100', 100)]
+    # Accepting this pair does not accept day90 as the same adult as the baseline.
+    result = panel(rows, [adult_decision(rows[1], rows[2], 'LINK_ADULT')])
+    assert next(r for r in result.audit if r['submission_id'] == 'day90')['duplicate_of'] == 'day100'
+    assert result.adult_pairs == result.shadow_pairs == []
+    assert result.child_pairs[0]['t1'] == 'day100'
+    assert result.comparisons[0]['exact_rule'] == 'collapsed_repeat_reported_birth_year_changed'
+    # A valid direct manual exception remains effective for its own pair.
+    result = panel(rows[:2], [adult_decision(rows[0], rows[1], 'LINK_ADULT')])
+    assert result.adult_pairs[0]['t1'] == 'day90'
+
+
+def test_stale_manual_evidence_on_a_collapsed_member_holds_adult_followup():
+    rows = [parent('base'), parent('early', 10), parent('later', 100)]
+    decision = adult_decision(rows[1], rows[2])
+    rows[1]['answer']['contact_02'] = '63456789'
+    result = panel(rows, [decision])
+    # A reopened decision prevents collapse itself, so it cannot disappear later.
+    assert all(r['duplicate_of'] is None for r in result.audit)
+    assert result.adult_pairs == result.shadow_pairs == []
+
+
 def test_missing_dates_hold_both_branches_and_equal_latest_holds_only_affected_branch():
     missing = panel([parent("p0"), parent("undated", observed_at=None)])
     assert missing.baselines == []
