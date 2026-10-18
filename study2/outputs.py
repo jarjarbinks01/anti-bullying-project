@@ -129,7 +129,8 @@ def export_row(record: dict) -> dict:
 
 
 def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_queue: list[dict], schemas: dict,
-                  adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None) -> dict:
+                  adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None,
+                  independent_parent_panel=None, panel_labels=None) -> dict:
     dyad_mapping = {r['child_id']: r for r in registration_rows or [] if r.get('child_id')}
     def permanent(child):
         item = dyad_mapping.get(child, {})
@@ -142,6 +143,10 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
     bd_by_child = {p["child_id"]: p for p in adult_pairs or []}
     bd_ids = {p[w] for p in adult_pairs or [] for w in ["t0", "t1"]}
     scored_ids = {r["submission_id"] for r in selected} | bd_ids
+    if independent_parent_panel is not None:
+        scored_ids |= {b['t0'] for b in independent_parent_panel.baselines}
+        scored_ids |= {p[w] for p in independent_parent_panel.child_pairs + independent_parent_panel.adult_pairs
+                       for w in ('t0', 't1')}
     scores = {sid: metrics(by_id[sid]["answer"], by_id[sid]["role"]) for sid in scored_ids}
     if len(cells) != len(selected):
         raise ValueError("Multiple selected submissions for one child/role/wave")
@@ -360,6 +365,12 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         tracking.to_parquet(folder / 'dyad_tracking.parquet', index=False)
         write_excel(folder / 'dyad_tracking.xlsx', {'家庭追蹤': tracking,
                     '待裁定': tracking[tracking['registration_state'] != 'active']}, tracking=True)
+    if independent_parent_panel is not None:
+        from .parent_panel_outputs import write_parent_panel
+        summary['independent_parent'] = write_parent_panel(
+            folder, independent_parent_panel, by_id, analysis_row, panel_labels or {})
+    from .descriptive_reports import prepare_reports
+    summary['descriptive'] = prepare_reports(folder, by_id, scored_ids, analysis_row, ef)
     from .artifacts import freeze_file
     for p in folder.glob('*.parquet'):freeze_file(p,p)
     return summary

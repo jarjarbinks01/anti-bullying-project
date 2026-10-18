@@ -73,7 +73,7 @@ if summary.get("source_scope") == "merged_abcd":
     st.info("資料來源：2.1.2 的四份 A／B／C／D 合併 Excel。電話差一位及轉校規則已啟用；BD 要求同一成人填卷人。")
     st.caption(f"按研究負責人決定，使用目前建立時間；其中 {summary.get('batch_creation_time_submissions',0):,} 行是批次指定日期。日期來源標記保留。")
     if student_anchored:
-        st.info('以學生為錨：先保留學生T1同日或之後的家長回應作T1；其餘選最接近學生T0的家長基線，可早於學生，不設日期差上限。家長自身沒有90日門檻，原始標籤保留。'
+        st.info('學生錨定樣本：先保留學生T1同日或之後的家長回應作T1；其餘選最接近學生T0的家長基線，可早於學生，不設日期差上限。家長自身沒有90日門檻，原始標籤保留。獨立家長分析另見同名頁籤。'
                 if nearest_parent_baseline else '以學生為錨：學生T1至少相隔90日；家長按學生兩輪的香港曆日分段，不設家長自身90日門檻。原始問卷標籤保留。')
 st.button("重新讀取目前版本", on_click=lambda: st.cache_data.clear())
 if summary.get("research_validation") == "not_yet_reviewed":
@@ -143,7 +143,11 @@ def imported_source_counts(release_id, state_dir, run_id):
     return counts.drop(columns="source_label")
 
 
-overview, analysis, evidence_tab, method, tracking_tab = st.tabs(["資料品質及進度", "描述統計", "配對證據", "統計口徑", "親子追蹤"])
+overview, analysis, independent_parent_tab, evidence_tab, tracking_tab, method = st.tabs(
+    ["資料品質及進度", "描述統計", "獨立家長分析", "配對證據", "親子追蹤", "統計口徑"])
+with independent_parent_tab:
+    from study2.parent_panel_dashboard import render_parent_panel
+    render_parent_panel(release_path, summary)
 with overview:
     cols = st.columns(4)
     for c, label, value in zip(cols, ["提交記錄", "學生跨期 AC", "同一成人跨期 BD" if summary.get("bd_requires_same_adult") else "家長回應跨期配對", "跨期親子 EF"], [summary["submissions"], summary["AC"], summary["BD"], summary["EF"]]):
@@ -218,78 +222,12 @@ with overview:
             st.metric("舊人工修正未能遷移",summary.get("legacy_corrections_pending",0))
     st.download_button("下載版本摘要", (release_path / "summary.json").read_bytes(), "study2-summary.json", "application/json")
 with analysis:
-    scope = st.selectbox("描述統計學校範圍", ["只限主流學校（研究分析）", "全部學校（與首頁一致）"], key="analysis_scope")
-    st.caption("首頁包括其他及未知學校；預設研究分析只限主流學校。選「全部學校」並清除其他篩選，可重現首頁對應樣本數。")
-    filters = st.columns(4)
-    role = filters[0].selectbox("填卷類別", ["student", "parent"], format_func=lambda x: "學生" if x == "student" else "家長回應（按孩子）")
-    wave = filters[1].selectbox("輪次", ["T0", "T1"])
-    cohort_options = ["全部保留樣本", "跨期配對樣本", "親子配對樣本", "跨期親子樣本"]
-    if role == "parent" and summary.get("bd_requires_same_adult"):
-        cohort_options += ["同一孩子的家長跨期回應"]
-    cohort = filters[2].selectbox("樣本", cohort_options)
-    gender = filters[3].selectbox("孩子性別", ["全部", "男", "女", "缺失"])
-    if role == "parent" and cohort == "跨期配對樣本" and summary.get("bd_requires_same_adult"):
-        st.caption("此頁使用BD的同一成人T0／T1選擇；T1可以與家庭F的最新家長回應不同。")
-    if role == "parent" and cohort in {"跨期親子樣本", "同一孩子的家長跨期回應"} and summary.get("bd_requires_same_adult"):
-        st.caption("這個樣本確認同一孩子，可能更換填卷人。分析同一成人PHQ變化請選跨期配對樣本（BD）。")
-    homepage_subset = analysis_cohort(frame, parent_frame, role, wave, cohort)
-    subset = homepage_subset.copy()
-    if scope.startswith("只限主流"):
-        subset = subset[subset["mainstream"]].copy()
-    school_scope_n = len(subset)
-    if gender != "全部":
-        subset = subset[subset["gender"].fillna("").astype(str) == {"男": "0", "女": "1", "缺失": ""}[gender]]
-    filters2 = st.columns(3)
-    types = filters2[0].multiselect("學校類型", sorted(subset["school_type"].dropna().unique()))
-    schools = filters2[1].multiselect("學校", sorted(subset["school"].dropna().unique()))
-    source_column = "source_type" if "source_type" in subset else "source"
-    source_names = {"paperform":"紙本", "school_batch":"學校批次", "socialworkdream":"Social Work Dream", "qualtrics":"Qualtrics", "legacy_online":"舊線上系統"}
-    sources = filters2[2].multiselect("資料來源", sorted(subset[source_column].dropna().unique()), format_func=lambda x: source_names.get(x,x))
-    if types:
-        subset = subset[subset["school_type"].isin(types)]
-    if schools:
-        subset = subset[subset["school"].isin(schools)]
-    if sources:
-        subset = subset[subset[source_column].isin(sources)]
-    if "identity_rules" in subset:
-        rule_options = sorted({rule for value in subset["identity_rules"].dropna() for rule in value.split(";") if rule})
-        rules = st.multiselect("孩子身份配對規則", rule_options, format_func=lambda x: rule_names.get(x, x))
-        if rules:
-            subset = subset[subset["identity_rules"].fillna("").map(lambda s: bool(set(s.split(";")) & set(rules)))]
-    count_columns = st.columns(3)
-    count_columns[0].metric("首頁口徑 N（全部學校、未篩選）", len(homepage_subset))
-    count_columns[1].metric("學校範圍後 N", school_scope_n)
-    count_columns[2].metric("目前樣本 N", len(subset))
-    st.caption(f"學校範圍排除 {len(homepage_subset)-school_scope_n:,} 份；性別、學校、來源及規則篩選再排除 {school_scope_n-len(subset):,} 份。N 按目前輪次的回應計數，量表有效 N 另扣缺題。")
-    if student_anchored and role == 'parent':
-        gap_columns = ['submission_id','student_parent_calendar_gap_days','parent_response_interval_days']
-        if nearest_parent_baseline:
-            gap_columns.insert(2,'student_parent_elapsed_gap_days')
-        gap_rows = subset.reindex(columns=gap_columns).rename(columns={
-            'submission_id':'家長提交ID','student_parent_calendar_gap_days':'距學生該輪日數（香港曆日）',
-            'student_parent_elapsed_gap_days':'家長減學生時間差（日）',
-            'parent_response_interval_days':'距家長T0日數（實際間隔）'})
-        with st.expander('核對家長與學生日期差'):
-            st.caption('日期差為家長減學生：負數表示家長較早，正數表示較遲；同一香港曆日仍可有實際時間差。家長T1沒有自身90日門檻；缺少家長T0時，兩次家長回應間隔維持缺失。')
-            st.dataframe(gap_rows, hide_index=True, width='stretch')
-            st.download_button('下載目前家長日期差',gap_rows.to_csv(index=False).encode('utf-8-sig'),'study2-parent-date-gaps.csv','text/csv')
-    demographics = st.columns(2)
-    with demographics[0]:
-        genders = subset["gender"].fillna("").map({"0": "男", "1": "女", "": "缺失"}).fillna("其他／未識別").value_counts().rename_axis("孩子性別").reset_index(name="回應數")
-        genders["分母"] = len(subset)
-        genders["比例"] = genders["回應數"] / len(subset) if len(subset) else 0
-        st.dataframe(genders, hide_index=True, width="stretch")
-    with demographics[1]:
-        ages = subset["age_at_observation"].dropna()
-        st.write(f"孩子觀察時年齡（按已填生日）：有效 N={len(ages)}；缺失 N={len(subset)-len(ages)}")
-        if len(ages):
-            st.plotly_chart(px.histogram(subset, x="age_at_observation", nbins=20, labels={"age_at_observation": "孩子觀察時年齡"}), width="stretch")
-    stats = descriptive_summary(subset)
-    st.subheader("量表及欺凌指標")
-    st.caption("家長PHQ是填卷家長自己的回應；家長SEC及欺凌題目描述所指孩子。FQOL、SEC及欺凌指標為題目平均；PHQ為總和。不同問卷版本的文字可比性仍須研究團隊核實。")
-    st.dataframe(stats.rename(columns={"metric": "指標", "sample_n": "樣本N", "valid_n": "有效N", "missing_n": "缺失N", "mean_or_proportion": "平均／比例", "sd": "標準差"}), hide_index=True, width="stretch")
-    st.download_button("下載目前篩選的描述統計", stats.to_csv(index=False).encode("utf-8-sig"), "study2-descriptives.csv", "text/csv")
+    from study2.descriptive_dashboard import render_descriptive
+    render_descriptive(release_path, summary, sample_frame, parent_frame, rule_names)
+
 with method:
+    if summary.get('independent_parent'):
+        st.markdown('**獨立家長分析**：另見同名頁籤。沿用已確認孩子身份，不要求學生問卷；以最早合資格家長回應為共同基線，選至少90日後的最新回應。同一成人分支另要求有效一致出生年份及精確聯絡，T1可不同。成人電話差一位只供試算，不加入正式同一成人樣本。原有學生錨定樣本保持獨立。')
     if summary.get('matching_policy', {}).get('allow_contact_bridge_components'):
         st.markdown('**聯絡群組身份確認**：群組內孩子生日及有效性別一致，且已接受的直接規則能連起全部提交時，自動確認同一孩子。啟用子群確認的版本會逐個聯絡連通子群檢查，不因外圍缺少連結而擋住有充分證據的子群。不得切開既有人工身份群組；子群內有身份矛盾、人工不配對或失效決定時不自動通過。不同子群欠證據不等於已確認不同孩子；單數問卷正常保留，重填及輪次另按規則判斷。')
     if nearest_parent_baseline:

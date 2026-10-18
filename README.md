@@ -2,6 +2,8 @@
 
 Local Python / SQLite pipeline and Streamlit dashboard for the HKU anti-bullying Study 2 panel. It links responses about the same child, identifies the same adult across waves, selects eligible T0 / T1 responses, and supports controlled human review.
 
+The [descriptive analysis guide](docs/DESCRIPTIVE_ANALYSIS.md) explains the four analysis cohorts, T0/T1 comparisons, demographic tables, denominators and versioned 4.1 Excel reports.
+
 **This repository contains code, generic documentation, synthetic tests and a blank Excel layout. Research data stays local.** No participant responses, databases, filled review cards, source manifests, published results, screenshots or machine-specific settings are included.
 
 ## Install
@@ -44,6 +46,7 @@ The dashboard opens at `http://127.0.0.1:8501` and reads only the published rele
 ## Research rules and review
 
 - [Matching, pairing and time rules](docs/MATCHING_RULES.md)
+- [Independent parent panels and dashboard](docs/INDEPENDENT_PARENT_ANALYSIS.md)
 - [Code map and first reading path](docs/CODE_READING_GUIDE.md)
 - [Stage purposes, inputs and outputs](docs/STAGES.md)
 - [Data model and stable identifiers](docs/DATA_MODEL.md)

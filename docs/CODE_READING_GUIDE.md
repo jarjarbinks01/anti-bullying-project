@@ -19,6 +19,8 @@
 | `merged.py`、`adapters.py` | 來源登記、標準化及匯入 | 由 `runner.run` 的呼叫追入 |
 | `matching.py` | 孩子身份、人工限制、學生輪次及重填 | `link_records`、`select_waves` |
 | `parent_waves.py` | 以學生為錨選取家長 T0/T1 | `select_parent_waves` |
+| `parent_panel.py` | 不依賴學生輪次的家長基線、兩種跨期選取及近似電話試算 | `build_parent_panel` |
+| `parent_panel_outputs.py`、`parent_panel_views.py`、`parent_panel_dashboard.py` | 獨立家長發布資料、逐筆核對及介面 | `write_parent_panel`、`verify_panel`、`render_parent_panel` |
 | `respondents.py` | 同一孩子下的成人身份及 BD | `adult_followups` |
 | `review_groups.py` | 建立完整比較範圍、凍結證據及展開群組裁定 | `build_groups`、`snapshot`、`commands` |
 | `review_dispatch.py` | 分流可派審、更正、背景及待新資料 | `Router`、`summary` |
@@ -54,6 +56,12 @@
 `adult_followups` 另行檢查 BD。有效人工決定優先，自動證據須符合成人年份及聯絡規則。`_consistent_adult_matches` 檢查所有競爭成人資料，防止某宗人工錯字例外經由第三份問卷傳遞。
 
 這些函數會直接更新傳入的 record 字典。改動時必須保留處理順序，不能在身份未定前先把回應去重。
+
+`build_parent_panel` 是獨立衍生分析：在 `select_waves` 之前複製家長資料，使用已有孩子群組，不修改原 record 或身份。兩個分支共用最早家長基線，獨立實行90日要求；成人近似電話只輸出試算。詳見 [獨立家長操作說明](INDEPENDENT_PARENT_ANALYSIS.md)。
+
+描述統計由 `descriptive_spec` 定義變項、`descriptive_data` 整理人口特徵、`descriptives` 選取正式樣本及聚合數值、`descriptive_reports` 匯出、`descriptive_dashboard` 顯示。四種模式與獨立家長共用核心；跨期固定基線分組，不改正式回應及分數。詳見 [描述統計操作說明](DESCRIPTIVE_ANALYSIS.md)。
+
+探索統計由 `descriptive_exploration` 統一計算分布、共同分箱、完整配對及二元轉移；`descriptive_charts` 只繪製聚合結果；`descriptive_workbench` 共用研究總覽與跨期比較；`descriptive_exploration_outputs` 寫入和驗證獨立版本的探索檔案。總覽每輪有效與工作台兩輪均有效的分母分開，舊四份 4.1 矩陣定義不變。不同角色和樣本的指標選單使用不同控制鍵，避免畫面殘留舊指標文字。
 
 ## 候選範圍不等於派審工作
 

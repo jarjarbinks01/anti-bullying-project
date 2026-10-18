@@ -104,7 +104,7 @@ def analysis_cohort(frame, parent_longitudinal, role, wave, cohort):
     result = source[(source["role"] == role) & (source["wave"] == wave)].copy()
     flag = COHORT_FLAGS.get(cohort)
     if flag:
-        result = result[result[flag].fillna(False)].copy()
+        result = result[result[flag].fillna(False).astype(bool)].copy()
     return result
 
 
