@@ -4,16 +4,44 @@ import plotly.graph_objects as go
 COLORS = {'T0':'#247b91','T1':'#df8751','delta':'#386d6b'}
 
 
+def _histogram_chart(histogram, variable):
+    """Separate waves while keeping the published bins and common axis ranges."""
+    from plotly.subplots import make_subplots
+
+    panels = list(histogram.groupby(['group_label', 'wave'], sort=False))
+    titles = []
+    for (group, wave), block in panels:
+        label = '逐人差值（T1 減 T0）' if wave == 'delta' else wave
+        titles.append(f"{group} · {label}（有效 N={int(block['denominator'].iloc[0]):,}）")
+    figure = make_subplots(rows=max(1, len(panels)), cols=1,
+        shared_xaxes=True, shared_yaxes='all', subplot_titles=titles,
+        vertical_spacing=min(.16, .3/max(1, len(panels))))
+    for row, ((group, wave), block) in enumerate(panels, 1):
+        figure.add_trace(go.Bar(name=f'{group} {wave}',
+            x=(block['bin_left']+block['bin_right'])/2, y=block['count'],
+            width=(block['bin_right']-block['bin_left'])*.95,
+            marker_color=COLORS[wave],
+            customdata=block[['bin_left','bin_right','denominator','right_inclusive']],
+            hovertemplate='分數範圍：%{customdata[0]:.3f} 至 %{customdata[1]:.3f}'
+                '<br>人數：%{y} / %{customdata[2]}<extra>%{fullData.name}</extra>'), row=row, col=1)
+    if panels:
+        figure.update_xaxes(range=[histogram['bin_left'].min(), histogram['bin_right'].max()],
+                            showticklabels=True)
+        figure.update_yaxes(range=[0, max(1, float(histogram['count'].max())*1.12)],
+                            title_text='有效人數', rangemode='tozero',
+                            dtick=1 if histogram['count'].max() <= 5 else None)
+    delta_only = bool(panels) and histogram['wave'].eq('delta').all()
+    x_title = ('分數差（T1 減 T0；' if delta_only else '分數（')+variable.unit+'）'
+    figure.update_xaxes(title_text=x_title, row=max(1, len(panels)), col=1)
+    figure.update_layout(title=variable.label, height=100+220*max(1, len(panels)),
+        showlegend=False, margin=dict(l=10,r=10,t=85,b=55), font={'size':13})
+    return figure
+
+
 def distribution_chart(summary, variable, *, histogram=None):
     fig=go.Figure()
     if histogram is not None:
-        for (group,wave),block in histogram.groupby(['group_label','wave'],sort=False):
-            fig.add_trace(go.Bar(name=f'{group} {wave}', x=(block['bin_left']+block['bin_right'])/2,
-                y=block['count'],width=(block['bin_right']-block['bin_left'])*.95,
-                marker_color=COLORS[wave],opacity=.7,
-                customdata=block[['bin_left','bin_right','denominator','right_inclusive']],
-                hovertemplate='%{customdata[0]:.3f} 至 %{customdata[1]:.3f}<br>n=%{y} / %{customdata[2]}<extra>%{fullData.name}</extra>'))
-        fig.update_layout(barmode='overlay',xaxis_title=variable.unit,yaxis_title='有效人數')
+        return _histogram_chart(histogram, variable)
     else:
         for row in summary.to_dict('records'):
             if not row['valid_n']:
@@ -32,7 +60,7 @@ def distribution_chart(summary, variable, *, histogram=None):
             lo,hi=values.min(),values.max();pad=max((hi-lo)*.08,.1)
             fig.update_yaxes(range=[lo-pad,hi+pad])
         fig.update_layout(yaxis_title=variable.unit,showlegend=False)
-    fig.update_layout(title=variable.label,height=310,margin=dict(l=10,r=10,t=45,b=75 if histogram is not None else 45),
+    fig.update_layout(title=variable.label,height=310,margin=dict(l=10,r=10,t=45,b=45),
                       legend={'orientation':'h','yanchor':'top','y':-.28,'x':0},font={'size':13})
     return fig
 
