@@ -104,6 +104,10 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             with db:
                 ingest(db, run_id, records)
                 children = assign_children(db, run_id, groups)
+                from .parent_panel import build_parent_panel
+                parent_panel = build_parent_panel(records, children, decisions,
+                    matching_policy=cfg.get("matching_policy", {}),
+                    duplicate_days=cfg["duplicate_days"], followup_days=cfg["minimum_followup_days"])
                 records, time_cases = select_waves(records, children, cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("bd_requires_same_adult", False), cfg.get("matching_policy", {}), adult_decisions=decisions, parent_wave_policy=cfg.get("parent_wave_policy"))
                 check_unexpected_backfill(db, records)
                 cases += time_cases
@@ -129,6 +133,8 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                 for event in events:
                     db.execute("INSERT INTO decision_events VALUES(?,?,?,?)", (run_id, event["decision_id"], event["status"], event["message"]))
             labels = validation_report(db, cases, records)
+            validation_report(db, parent_panel.guard_cases, records)
+            panel_labels = {r["case_id"]: dict(r) for r in db.execute("SELECT * FROM labels")}
             dyad_rows = dyads.stage(db, run_id, records, cases, cfg)
             # Persist reservations before output/publication so a retry reuses IDs.
             backup_tracking(db, cfg, "staged_" + run_id)
@@ -139,7 +145,8 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             online, _, _ = modules(cfg)
             print("Writing versioned outputs and audit tables", flush=True)
             with artifact_cache(state/'artifact_objects',folder):
-                summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows)
+                summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows,
+                                        independent_parent_panel=parent_panel, panel_labels=panel_labels)
             summary["permanent_registration"] = dyads.validate_staging(db, run_id, records, cases, cfg)
             summary["manual_decisions_reopened"] = sum(e["status"] == "reopened" for e in events)
             summary["legacy_corrections_pending"] = sum(r["migration_status"].startswith("pending") for r in migration)
@@ -254,6 +261,10 @@ def verify_release(db, release_id):
     for name, expected in hashes.items():
         if logical_hash(path/name) != expected:
             raise PipelineError("Published file checksum mismatch")
+    descriptive = json.loads(row['stats_json']).get('descriptive')
+    if descriptive:
+        from .descriptive_reports import verify_reports
+        verify_reports(path, descriptive)
     expected_backup = json.loads((path / "backup.sha256.json").read_text())["backup.sqlite"]
     if not (path/'backup.sqlite').exists() and not (path/'backup.sqlite.gz').exists():
         if not (path/'backup.retention.json').exists():
@@ -305,6 +316,11 @@ def publish_release(db, cfg, release_id, rollback=False):
     # Newly collected NONMATCH labels must also guard publication of older releases.
     cases = [json.loads(r[0]) for r in db.execute("SELECT payload_json FROM release_candidates WHERE release_id=?", (release_id,))]
     validation_report(db, cases)
+    panel_guard = Path(row['path']) / 'independent_parent_guard.jsonl.gz'
+    if panel_guard.exists():
+        import gzip
+        with gzip.open(panel_guard, 'rt', encoding='utf-8') as handle:
+            validation_report(db, [json.loads(line) for line in handle])
     from .review_core import backup_workspace
     review_backup = backup_workspace(cfg, "publish_" + release_id)
     from .dyad_operator import backup_tracking, recovery_check

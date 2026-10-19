@@ -24,6 +24,8 @@ EXACT_PATHS = {
     'docs/DATA_MODEL.md', 'docs/STAGES.md', 'docs/REVIEW_CARDS_COLLEAGUES.md',
     'docs/REVIEW_CARDS_OPERATIONS.md', 'docs/MATCHING_RULES.md',
     'docs/REPOSITORY.md', 'docs/DYAD_TRACKING_OPERATIONS.md', 'docs/CODE_READING_GUIDE.md',
+    'docs/INDEPENDENT_PARENT_ANALYSIS.md',
+    'docs/DESCRIPTIVE_ANALYSIS.md',
 }
 PYTHON_DIRECTORIES = {'study2', 'tests', 'mappings'}
 TEMPLATE_PATH = 'study2/assets/review_template.xlsx'

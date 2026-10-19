@@ -129,7 +129,13 @@ def export_row(record: dict) -> dict:
 
 
 def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_queue: list[dict], schemas: dict,
-                  adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None) -> dict:
+                  adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None,
+                  independent_parent_panel=None, panel_labels=None) -> dict:
+    if independent_parent_panel is not None:
+        # Output-only overlay: preserve validated independent-parent exceptions
+        # for all report surfaces without changing source records or waves.
+        records = [{**r, **independent_parent_panel.adult_metadata.get(r['submission_id'], {})}
+                   for r in records]
     dyad_mapping = {r['child_id']: r for r in registration_rows or [] if r.get('child_id')}
     def permanent(child):
         item = dyad_mapping.get(child, {})
@@ -142,6 +148,10 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
     bd_by_child = {p["child_id"]: p for p in adult_pairs or []}
     bd_ids = {p[w] for p in adult_pairs or [] for w in ["t0", "t1"]}
     scored_ids = {r["submission_id"] for r in selected} | bd_ids
+    if independent_parent_panel is not None:
+        scored_ids |= {b['t0'] for b in independent_parent_panel.baselines}
+        scored_ids |= {p[w] for p in independent_parent_panel.child_pairs + independent_parent_panel.adult_pairs
+                       for w in ('t0', 't1')}
     scores = {sid: metrics(by_id[sid]["answer"], by_id[sid]["role"]) for sid in scored_ids}
     if len(cells) != len(selected):
         raise ValueError("Multiple selected submissions for one child/role/wave")
@@ -286,6 +296,8 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                          "source_label": label, "source_type": source_category(label),
                          "identity_rules": ";".join(r.get("identity_rules", [])),
                          "date_basis": r.get("date_basis"), "respondent_id": r.get("respondent_id"),
+                         'adult_birth_year_status': r.get('adult_birth_year_status', ''),
+                         'adult_identity_exception_type': (r.get('adult_identity_exception') or {}).get('type', ''),
                          "school_type": school_type, "gender": r.get("gender"), "grade": r.get("grade"),
                          "age_at_observation": age, "time_confidence": r["time_confidence"],
                          "mainstream": mainstream, "longitudinal": r["submission_id"] in bd_ids if role == "parent" and adult_pairs is not None else (r["child_id"], role) in longitudinal,
@@ -299,6 +311,7 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
     summary["analysis_other_or_unknown_rows"] = len(analysis) - summary["analysis_mainstream_rows"]
     analysis_columns = ["submission_id", "child_id", "role", "wave", "source", "source_type", "source_label", "school", "school_type", "gender", "grade", "age_at_observation", "time_confidence", "date_basis", "identity_rules", "respondent_id", "mainstream", "longitudinal", "child_report_longitudinal", "dyad", "longitudinal_dyad"] + list(metrics({}, "student"))
     analysis_columns += PARENT_WAVE_FIELDS
+    analysis_columns += ['adult_birth_year_status', 'adult_identity_exception_type']
     pd.DataFrame(analysis, columns=analysis_columns).to_parquet(folder / "analysis.parquet", index=False)
     if adult_pairs is not None:
         bd_analysis = [analysis_row(by_id[p[w]], wave) for p in adult_pairs for w, wave in [("t0", "T0"), ("t1", "T1")]]
@@ -360,6 +373,12 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         tracking.to_parquet(folder / 'dyad_tracking.parquet', index=False)
         write_excel(folder / 'dyad_tracking.xlsx', {'家庭追蹤': tracking,
                     '待裁定': tracking[tracking['registration_state'] != 'active']}, tracking=True)
+    if independent_parent_panel is not None:
+        from .parent_panel_outputs import write_parent_panel
+        summary['independent_parent'] = write_parent_panel(
+            folder, independent_parent_panel, by_id, analysis_row, panel_labels or {})
+    from .descriptive_reports import prepare_reports
+    summary['descriptive'] = prepare_reports(folder, by_id, scored_ids, analysis_row, ef)
     from .artifacts import freeze_file
     for p in folder.glob('*.parquet'):freeze_file(p,p)
     return summary
