@@ -219,6 +219,26 @@ def test_stale_manual_evidence_on_a_collapsed_member_holds_adult_followup():
     assert result.adult_pairs == result.shadow_pairs == []
 
 
+def test_valid_unknown_year_exception_survives_private_selection_copies():
+    rows = [parent('base'), parent('typo', 100, year=1981), parent('other', 140)]
+    decision = adult_decision(rows[0], rows[1], 'LINK_ADULT')
+    decision['payload']['adult_identity_exception'] = {
+        'type': 'accepted_typo_unknown_year', 'child_id': 'confirmed_child',
+        'correct_birth_year': None, 'authority': 'Synthetic supervisor', 'reason': 'Confirmed typo',
+    }
+    before = copy.deepcopy(rows)
+    children = {r['submission_id']: 'confirmed_child' for r in rows}
+    result = build_parent_panel(rows, children, [decision], matching_policy=POLICY)
+    assert rows == before
+    assert set(result.adult_metadata) == {'base', 'typo'}
+    assert all(item['adult_birth_year_status'] == 'unconfirmed' for item in result.adult_metadata.values())
+    assert all(item['adult_identity_exception'] == decision['payload']['adult_identity_exception']
+               for item in result.adult_metadata.values())
+    rows[1]['answer']['adult_demographics_05'] = 1982
+    reopened = build_parent_panel(rows, children, [decision], matching_policy=POLICY)
+    assert reopened.adult_metadata == {}
+
+
 def test_missing_dates_hold_both_branches_and_equal_latest_holds_only_affected_branch():
     missing = panel([parent("p0"), parent("undated", observed_at=None)])
     assert missing.baselines == []

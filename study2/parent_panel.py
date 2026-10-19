@@ -6,7 +6,7 @@ shared baseline. Adult continuity is checked separately and is not transitive.
 """
 from collections import Counter, defaultdict
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from .common import PipelineError, text, timestamp
@@ -36,6 +36,7 @@ class ParentPanel:
     guard_cases: list[dict]
     duplicate_days: int
     followup_days: int
+    adult_metadata: dict = field(default_factory=dict)
 
     def summary(self):
         exact = {p["child_id"]: p for p in self.adult_pairs}
@@ -165,6 +166,14 @@ def build_parent_panel(records, children, decisions=(), *, matching_policy=None,
     for r in parents:
         r["child_id"] = children.get(r["submission_id"])
     state = adult_decision_state(parents, decisions)
+    # Validation annotates these private copies. Carry that evidence explicitly
+    # to output adapters even when student-anchored BD processing is disabled.
+    validated_ids = {sid for pair in state[3] if state[0].get(pair) == 'LINK_ADULT' for sid in pair}
+    adult_metadata = {
+        r['submission_id']: {key: deepcopy(r[key]) for key in
+                             ('adult_identity_exception', 'adult_birth_year_status') if key in r}
+        for r in parents if r['submission_id'] in validated_ids
+    }
     classify = lambda a, b: classify_adult(a, b, matching_policy, state)
     shadow_classify = lambda a, b: _one_digit_adult(a, b, state, matching_policy)
     audit, groups = {}, defaultdict(list)
@@ -258,4 +267,4 @@ def build_parent_panel(records, children, decisions=(), *, matching_policy=None,
                                         "extra_followup" if r in eligible else "under_90_days")
     return ParentPanel(baselines, child_pairs, adult_pairs, shadow_pairs,
                        [audit[sid] for sid in sorted(audit)], comparisons, guard_cases,
-                       duplicate_days, followup_days)
+                       duplicate_days, followup_days, adult_metadata=adult_metadata)

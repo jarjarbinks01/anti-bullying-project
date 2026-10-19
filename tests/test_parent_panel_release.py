@@ -126,6 +126,75 @@ def test_collapsed_adult_nonmatch_cannot_publish_a_same_person_phq_change(projec
     assert not workbook['panel_branch'].eq(ADULT).any()
 
 
+@pytest.mark.parametrize('bd_requirement', [None, False, True])
+def test_unknown_parent_year_exception_reaches_every_report_without_bd_dependency(project, bd_requirement):
+    from study2.respondents import adult_evidence
+    from study2.descriptive_spec import REPORT_FILES
+    from study2.descriptives import independent_cohort, statistics
+    cfg, _, rows, _ = project
+    cfg['parent_wave_policy'] = POLICY
+    if bd_requirement is not None:
+        cfg['bd_requires_same_adult'] = bd_requirement
+    parents = [r for r in rows if r['role'] == 'parent']
+    for r, year in zip(parents, [1980, 1981]):
+        r['answer']['adult_demographics_05'] = year
+    initial = execute(project)
+    db = connect(Path(cfg['state_dir']))
+    child = db.execute('SELECT child_id FROM identity_members WHERE run_id=? AND submission_id=?',
+                       (initial['release_id'], parents[0]['submission_id'])).fetchone()[0]
+    a, b = parents
+    exception = dict(type='accepted_typo_unknown_year', child_id=child, correct_birth_year=None,
+                     authority='Synthetic supervisor', reason='Same adult; correct year unknown',
+                     record_a=a['submission_id'], record_b=b['submission_id'])
+    payload = dict(action='LINK_ADULT', target_key='adult:p0:p1',
+                   record_a=a['submission_id'], record_b=b['submission_id'],
+                   version_a=a['version_id'], version_b=b['version_id'],
+                   evidence_a=adult_evidence(a), evidence_b=adult_evidence(b),
+                   adult_identity_exception=exception)
+    with db:
+        db.execute('INSERT INTO decisions VALUES(?,?,?,?,?,?)',
+                   ('synthetic_year_exception', utcnow(), 'Synthetic reviewer',
+                    'Year remains unknown', dumps(payload), None))
+    db.close()
+    before = copy.deepcopy(rows)
+    summary = execute(project, force=True)
+    assert rows == before
+    assert summary['independent_parent']['same_adult_pairs'] == 1
+    assert [r['answer']['adult_demographics_05'] for r in parents] == [1980, 1981]
+    assert all('adult_birth_year_status' not in r for r in rows)
+    assert {k: summary[k] for k in ['A', 'B', 'C', 'D', 'AC', 'E', 'F', 'EF']} == {
+        k: initial[k] for k in ['A', 'B', 'C', 'D', 'AC', 'E', 'F', 'EF']}
+    folder = Path(cfg['release_dir'])/summary['release_id']
+    assert (folder/'parent_longitudinal.parquet').exists() == (bd_requirement is True)
+    data = read_panel(folder)
+    for wave in ('T0', 'T1'):
+        assert data['pairs'][wave+'_adult_birth_year_status'].eq('unconfirmed').all()
+        assert data['pairs'][wave+'_adult_identity_exception'].eq('accepted_typo_unknown_year').all()
+    assert data['analysis']['adult_birth_year_status'].eq('unconfirmed').all()
+    assert data['audit']['adult_birth_year_status'].eq('unconfirmed').all()
+    assert all(json.loads(s) == exception for s in data['audit']['adult_identity_exception_json'])
+    broken = copy.deepcopy(data)
+    broken['analysis'].loc[0, 'adult_birth_year_status'] = ''
+    with pytest.raises(PipelineError, match='unknown birth year'):
+        verify_panel(broken, summary['independent_parent'])
+    measurements = pd.read_parquet(folder/'descriptive_measurements.parquet')
+    parent_values = measurements[measurements['submission_id'].isin([a['submission_id'], b['submission_id']])]
+    assert parent_values['dem_adult_age'].isna().all()
+    assert parent_values['dem_adult_age__status'].eq('unconfirmed_year').all()
+    selected = independent_cohort(data['analysis'], measurements, ADULT)
+    age = statistics(selected, 'parent').query("variable_id == 'dem_adult_age'")
+    assert age['valid_n'].eq(0).all() and age['missing_n'].eq(1).all()
+    stats = pd.read_parquet(folder/'descriptive_statistics.parquet')
+    age = stats.query("variable_id == 'dem_adult_age'")
+    assert age['valid_n'].eq(0).all()
+    for filename in REPORT_FILES.values():
+        report = pd.read_excel(folder/'4.1_descriptive'/filename, sheet_name='統計明細')
+        assert report.query("variable_id == 'dem_adult_age'")['valid_n'].eq(0).all()
+    workbook = pd.read_excel(folder/'independent_parent.xlsx', sheet_name=None)
+    assert workbook['正式跨期樣本']['T0_adult_birth_year_status'].eq('unconfirmed').all()
+    assert workbook['全部家長處理追查']['adult_identity_exception_type'].eq('accepted_typo_unknown_year').all()
+
+
 def test_dashboard_widget_roundtrip_and_empty_filter(project):
     from streamlit.testing.v1 import AppTest
     cfg, _, rows, _ = project

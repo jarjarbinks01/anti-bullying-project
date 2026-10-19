@@ -86,6 +86,9 @@ def write_parent_panel(folder, panel, by_id, analysis_row, labels):
                **{k: record.get(k) for k in ('source_id', 'source_label', 'source_key', 'claimed_wave',
                                              'observed_at', 'time_confidence', 'date_basis', 'selected_wave', 'status')},
                'source_location': dumps(record.get('location', {}))}
+        row['adult_birth_year_status'] = record.get('adult_birth_year_status', '')
+        row['adult_identity_exception_type'] = (record.get('adult_identity_exception') or {}).get('type', '')
+        row['adult_identity_exception_json'] = dumps(record.get('adult_identity_exception'))
         for field in ('t0_id', 'child_report_T1_id', 'same_adult_T1_id'):
             row[field + '_selected'] = entry[field] == entry['submission_id']
         audit_rows.append(row)

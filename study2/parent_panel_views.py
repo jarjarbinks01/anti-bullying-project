@@ -37,6 +37,19 @@ def verify_panel(data, summary):
         raise PipelineError('Independent parent measurement slots are not unique')
     if audit['submission_id'].duplicated().any():
         raise PipelineError('Independent parent audit counts one submission more than once')
+    # Older releases lack this audit metadata. New releases must preserve an
+    # unknown-year decision in every exported occurrence of its submissions.
+    if 'adult_identity_exception_type' in audit:
+        unknown = audit['adult_identity_exception_type'].eq('accepted_typo_unknown_year')
+        ids = set(audit.loc[unknown, 'submission_id'])
+        if unknown.any() and not audit.loc[unknown, 'adult_birth_year_status'].eq('unconfirmed').all():
+            raise PipelineError('Independent parent unknown birth year lost its audit status')
+        views = [(analysis, 'submission_id', 'adult_birth_year_status')]
+        views += [(pairs, wave+'_submission_id', wave+'_adult_birth_year_status') for wave in ('T0', 'T1')]
+        for view, key, status in views:
+            selected = view[key].isin(ids)
+            if selected.any() and (status not in view or not view.loc[selected, status].eq('unconfirmed').all()):
+                raise PipelineError('Independent parent unknown birth year lost its output status')
     slots = {(r.panel_branch, r.child_id, r.panel_wave): r.submission_id
              for r in analysis.itertuples()}
     baseline_ids = {r.child_id: r.submission_id for r in analysis.itertuples()
