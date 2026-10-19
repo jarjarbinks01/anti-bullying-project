@@ -136,6 +136,42 @@ def test_chart_keeps_t0_t1_at_distinct_named_positions_and_nine_groups_readable(
     assert category_chart(result['categories'],band).layout.height>=1500
 
 
+def test_histogram_separates_waves_with_common_axes_and_preserves_counts():
+    from study2.descriptive_charts import distribution_chart
+    from study2.descriptive_spec import variables
+    result=explore(panel([0,0,3],[1,2,2]),'student',paired=True,selected_variables=['PHQ_total'])
+    histogram=result['histograms'].query('wave != "delta"').copy()
+    before=histogram.copy(deep=True)
+    var=next(v for v in variables('student') if v.key=='PHQ_total')
+    figure=distribution_chart(result['distribution_summary'],var,histogram=histogram)
+    assert len(figure.data)==2
+    first,last=figure.data
+    assert (first.xaxis,last.xaxis)==('x','x2')
+    assert (first.yaxis,last.yaxis)==('y','y2')
+    assert list(first.x)==list(last.x)==[0,1,2,3]
+    assert list(first.y)==[2,0,0,1] and list(last.y)==[0,1,2,0]
+    assert figure.layout.xaxis.range==figure.layout.xaxis2.range==(-.5,3.5)
+    assert figure.layout.yaxis.range==figure.layout.yaxis2.range
+    assert figure.layout.xaxis.matches=='x2' and figure.layout.yaxis.matches=='y2'
+    assert figure.layout.yaxis.dtick==figure.layout.yaxis2.dtick==1
+    assert figure.layout.yaxis.range[0]==0 and figure.layout.yaxis.range[1]>2
+    assert [label.text for label in figure.layout.annotations]==['全部 · T0（有效 N=3）','全部 · T1（有效 N=3）']
+    pd.testing.assert_frame_equal(histogram,before)
+
+
+def test_single_delta_histogram_keeps_one_panel_and_zero_reference():
+    from study2.descriptive_charts import distribution_chart
+    from study2.descriptive_spec import variables
+    result=explore(panel([1,3],[3,2]),'student',paired=True,selected_variables=['PHQ_total'])
+    histogram=result['histograms'].query('wave == "delta"')
+    var=next(v for v in variables('student') if v.key=='PHQ_total')
+    figure=distribution_chart(result['distribution_summary'],var,histogram=histogram)
+    figure.add_vline(x=0)
+    assert len(figure.data)==1 and sum(figure.data[0].y)==2
+    assert 'T1 減 T0' in figure.layout.xaxis.title.text
+    assert len(figure.layout.shapes)==1 and figure.layout.shapes[0].x0==0
+
+
 def test_aggregate_workbook_contains_bases_and_no_person_rows():
     result=explore(panel([1,2],[2,3]),'student',paired=True,selected_variables=['PHQ_total'],metadata={'schools':['Example']})
     data=filtered_workbook(None,pd.DataFrame(),result['metadata'],exploration=result)
@@ -196,6 +232,14 @@ def test_workbench_controls_all_types_and_role_protection(inputs):
     assert not app.exception
     assert not any('PHQ' in label for label in app.selectbox(key='test_variable_efmatched_parent').options)
     assert app.selectbox(key='test_variable_efmatched_parent').value=='FQOL_total'
+    assert app.radio(key='test_view').value=='逐人變化'
+    assert all(r.key!='test_distribution' for r in app.radio)
+    app.radio(key='test_view').set_value('T0／T1 分布').run()
+    app.radio(key='test_distribution').set_value('直方圖').run()
+    assert not app.exception
+    figure=json.loads(app.get('plotly_chart')[0].proto.spec)
+    assert [t['xaxis'] for t in figure['data']]==['x','x2']
+    assert any('T0在上、T1在下' in c.value for c in app.caption)
     app.radio(key='test_view').set_value('逐人變化').run()
     assert not app.exception
     app.selectbox(key='test_variable_efmatched_parent').set_value('TBV_prevalence2').run()

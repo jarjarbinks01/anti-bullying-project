@@ -99,7 +99,7 @@ def _capability(folder,summary):
 
 def _legacy(folder,summary,frame,parents):
     import streamlit as st
-    st.info('此歷史版本未包含新版 4.1 人口特徵及並排報表。以下保留舊量表統計。')
+    st.info('此歷史版本未包含新版 4.1 人口特徵及並排報表，未提供時段趨勢。以下保留舊量表統計。')
     from .dashboard_views import analysis_cohort
     from .outputs import descriptive_summary
     role=st.selectbox('填卷類別',['student','parent'],key='legacy_ds_role')
@@ -120,7 +120,7 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
     def load_measurements(release_id,path):
         return pd.read_parquet(Path(path)/'descriptive_measurements.parquet')
     measurements=load_measurements(summary['release_id'],str(folder))
-    reading=st.radio('閱讀方式',['研究總覽','跨期比較'],horizontal=True,key='ds_reading')
+    reading=st.radio('閱讀方式',['研究總覽','跨期比較','時段趨勢'],horizontal=True,key='ds_reading')
     paired=reading=='跨期比較';prefix='dx' if paired else 'ds'
     controls=st.columns(3)
     modes=['acbd','efmatched'] if paired else list(MODES)
@@ -155,7 +155,7 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
     filters=dict(mainstream=main,schools=schools,sources=sources,rules=rules,group=group)
     selected,counts=filter_cohort(rows,**filters)
     n=wave_counts(selected)
-    st.metric('目前 T0／T1 N',f"{n['T0']:,} / {n['T1']:,}")
+    st.metric('日期篩選前 T0／T1 N' if reading=='時段趨勢' else '目前 T0／T1 N',f"{n['T0']:,} / {n['T1']:,}")
     anchor=rows['grouping_anchor'].iloc[0] if len(rows) else '此模式既定錨點'
     st.caption(f"{MODES[mode]}；{'學生' if role=='student' else '家長'}；{'主流學校' if main else '全部學校'}；{GROUPS[group]}。分組依據：{anchor}。")
     active=[]
@@ -164,6 +164,8 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
     st.caption('目前篩選：'+('；'.join(active) if active else '無進階篩選')+'。')
     if paired:
         st.caption('這是明確選定的正式跨期樣本。與總覽的各輪 A–D／E–F 人數可能不同；指標缺失另扣。BD 使用其實際選定 T1。')
+    elif reading=='時段趨勢':
+        st.caption('以下按填卷日期篩選正式選定回應，輪次不重新選取；每期各自有效回答，完整設定及下載標示 calendar_response。')
     else:
         st.caption('兩輪各自有效回答。A–D／E–F 可以不同人；逐人變化請明確選取「跨期比較」的樣本及新 N。完整設定及下載標示 wave_valid。')
     with st.expander('核對口徑、逐步排除數及資料版本'):
@@ -181,6 +183,9 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
             st.info('此發布未提供跨期探索能力；研究總覽及原有報表仍可閱讀。發布新版後可使用工作台。')
         else:
             render_workbench(selected,role,summary['release_id'],prefix=prefix,metadata=metadata)
+    elif reading=='時段趨勢':
+        from .descriptive_trend_dashboard import render_trends
+        render_trends(selected,role,summary['release_id'],prefix='ds_trend',metadata=metadata)
     else:
         render_overview(selected,role,summary['release_id'],prefix=prefix,groups=(group,),metadata=metadata)
     if role=='parent' and mode=='efmatched':

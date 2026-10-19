@@ -128,14 +128,17 @@ def render_parent_panel(folder, summary):
                        'study2-independent-parent-responses.csv', 'text/csv')
     st.subheader('獨立家長描述統計')
     if new_reports:
-        st.caption('上方輪次只控制明細及該輪回應下載；以下統計固定把 T0／T1 並排。')
+        st.caption('上方輪次只控制明細及該輪回應下載；以下總覽及跨期統計把 T0／T1 並排，時段趨勢另有自己的輪次及日期控制。')
         from .descriptive_workbench import render_overview,render_workbench
         from .descriptive_dashboard import _capability
-        reading=st.radio('獨立家長統計閱讀方式',['研究總覽','跨期比較'],horizontal=True,key='ipp_reading')
+        reading=st.radio('獨立家長統計閱讀方式',['研究總覽','跨期比較','時段趨勢'],horizontal=True,key='ipp_reading')
         metadata={'branch':branch,'paired_only':paired_only,'mainstream':mainstream,
                   'gender':gender,'schools':schools,'sources':sources,'school_types':types}
         if reading=='研究總覽':
             render_overview(report_selected,'parent',summary['release_id'],prefix='ipp_overview',metadata=metadata)
+        elif reading=='時段趨勢':
+            from .descriptive_trend_dashboard import render_trends
+            render_trends(report_selected,'parent',summary['release_id'],prefix='ipp_trend',metadata=metadata)
         elif not paired_only:
             st.info('全部基線及追蹤不等於完整跨期樣本。請先把「獨立家長分析範圍」明確選為跨期樣本，再核對新 N。')
         elif not _capability(folder,summary):
@@ -151,7 +154,7 @@ def render_parent_panel(folder, summary):
 def _legacy_statistics(rows):
     import streamlit as st
     from .outputs import descriptive_summary
-    st.info('此歷史版本未包含新版人口特徵；以下沿用舊量表摘要。')
+    st.info('此歷史版本未包含新版人口特徵，未提供時段趨勢；以下沿用舊量表摘要。')
     gender_counts = rows['gender'].fillna('').astype(str).map({'0': '男', '1': '女', '': '缺失'}).fillna('其他').value_counts().rename_axis('孩子性別').reset_index(name='回應數')
     gender_counts['分母'] = len(rows)
     gender_counts['比例'] = gender_counts['回應數'] / len(rows) if len(rows) else 0

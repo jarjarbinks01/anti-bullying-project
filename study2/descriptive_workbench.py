@@ -207,7 +207,7 @@ def render_workbench(rows,role,release_id,*,prefix,metadata=None):
         return
     default=next((i for i,v in enumerate(options) if v.key=='PHQ_total'),0)
     var=select_variable(st,'跨期比較指標',options,prefix+'_variable',default,context=mode_of(rows)+'_'+role)
-    view=st.radio('比較視角',['T0／T1 分布','逐人變化','子群比較'],horizontal=True,key=prefix+'_view')
+    view=st.radio('比較視角',['逐人變化','T0／T1 分布','子群比較'],horizontal=True,key=prefix+'_view')
     grouping=st.selectbox('子群依據',['all','gender','stage','nine'],
         format_func={'all':'全部','gender':'孩子基線性別','stage':'基線學校階段','nine':'九組（互有重疊，不可相加）'}.get,
         key=prefix+'_groups') if view=='子群比較' else 'all'
@@ -225,7 +225,9 @@ def render_workbench(rows,role,release_id,*,prefix,metadata=None):
         histogram=(st.radio('分布圖',['箱形圖','直方圖'],horizontal=True,key=prefix+'_distribution')=='直方圖'
                    if var.kind=='continuous' else False)
         _chart_result(st,result,var,prefix+'_distribution_chart',histogram)
-        if var.kind=='continuous':
+        if histogram:
+            st.caption('T0在上、T1在下；兩圖使用相同分數範圍、分組界線及人數刻度。橫軸是分數，縱軸是落在該分數範圍的人數；滑鼠提示顯示人數／有效N。柱高差不是逐人變化人數。')
+        elif var.kind=='continuous':
             st.caption('兩輪及子群共用量尺／分箱；linear 分位數，鬚為 1.5 IQR 內最遠實際值。N=1 顯示單點，不估算 SD。')
     elif view=='逐人變化':
         if var.kind=='continuous':
