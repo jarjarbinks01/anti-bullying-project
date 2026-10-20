@@ -16,6 +16,7 @@ from study2.store import connect, current
 from study2.dashboard_views import (SAMPLE_NAMES, analysis_cohort, selected_sample,
                                    sample_reconciliation, sample_display, stage_overview,
                                    source_wave_counts)
+from study2.dashboard_header import HeaderFacts, build_header, render_header, render_missing_release
 
 st.set_page_config(page_title="Study 2 研究資料", page_icon="📊", layout="wide")
 cfg = load_config(Path(os.environ.get("STUDY2_CONFIG", Path(__file__).parent / "config.local.json")))
@@ -23,10 +24,8 @@ db = connect(Path(cfg["state_dir"]), readonly=True)
 release = current(db)
 decision_revision = digest([tuple(r) for r in db.execute('SELECT decision_id,payload_json,supersedes FROM decisions ORDER BY decision_id')])
 db.close()
-st.title("Study 2 研究資料")
-st.caption("本機原型 · 確認配對與待審個案分開 · 每項統計顯示有效樣本及缺失數")
 if not release:
-    st.info("尚未發布資料。請先完成資料匯入及檢查。")
+    render_missing_release()
     st.stop()
 summary = json.loads(release["stats_json"])
 student_anchored = bool(summary.get('parent_wave_policy'))
@@ -68,26 +67,25 @@ rule_names = {
     "under_30_days": "不足30日後續重填，保留較新回應",
     "unmatched": "未找到身份候選",
 }
-st.caption(f"資料版本：{release['release_id']} · 版本產生時間：{release['created_at']}")
-if summary.get("source_scope") == "merged_abcd":
-    st.info("資料來源：2.1.2 的四份 A／B／C／D 合併 Excel。電話差一位及轉校規則已啟用；BD 要求同一成人填卷人。")
-    st.caption(f"按研究負責人決定，使用目前建立時間；其中 {summary.get('batch_creation_time_submissions',0):,} 行是批次指定日期。日期來源標記保留。")
-    if student_anchored:
-        st.info('學生錨定樣本：先保留學生T1同日或之後的家長回應作T1；其餘選最接近學生T0的家長基線，可早於學生，不設日期差上限。家長自身沒有90日門檻，原始標籤保留。獨立家長分析另見同名頁籤。'
-                if nearest_parent_baseline else '以學生為錨：學生T1至少相隔90日；家長按學生兩輪的香港曆日分段，不設家長自身90日門檻。原始問卷標籤保留。')
-st.button("重新讀取目前版本", on_click=lambda: st.cache_data.clear())
-if summary.get("research_validation") == "not_yet_reviewed":
-    st.warning("程式檢查已通過；研究同事尚未建立人工核實案例集，實際配對準確度未驗證。")
 failure = Path(cfg["state_dir"]) / "last_failure.json"
+last_update_error = None
 if failure.exists():
     event = json.loads(failure.read_text())
-    st.error("最近一次更新失敗，仍顯示上一個已發布版本。" + event["error"])
-freshness_date=summary.get("source_exported_at") or release["created_at"]
-if not summary.get("source_exported_at"):
-    st.info("下載 agent 尚未提供匯出時間；版本產生時間只代表本機處理時間，不能證明來源資料最新。")
-age = (datetime.now(timezone.utc) - datetime.fromisoformat(freshness_date.replace("Z","+00:00"))).days
-if age > cfg["stale_after_days"]:
-    st.warning(f"{'來源匯出' if summary.get('source_exported_at') else '版本產生'}已 {age} 日，請檢查每星期匯出是否完成。")
+    last_update_error = event.get("error") or ""
+render_header(build_header(HeaderFacts(
+    release_id=release["release_id"],
+    created_at=release["created_at"],
+    source_exported_at=summary.get("source_exported_at"),
+    stale_after_days=cfg.get("stale_after_days"),
+    now=datetime.now(timezone.utc),
+    source_scope=summary.get("source_scope"),
+    bd_requires_same_adult=summary.get("bd_requires_same_adult"),
+    batch_creation_time_submissions=summary.get("batch_creation_time_submissions"),
+    parent_wave_policy=summary.get("parent_wave_policy"),
+    nearest_parent_baseline=nearest_parent_baseline,
+    research_validation=summary.get("research_validation"),
+    last_update_error=last_update_error,
+)), on_reload=lambda: st.cache_data.clear())
 
 
 @st.cache_data(show_spinner=False)
