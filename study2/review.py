@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -245,23 +246,29 @@ def commit_review_rows(db, validated: dict, application: dict | None = None) -> 
     """Commit already validated changes; application marker shares this transaction."""
     actions, labels, school_changes = (validated[k] for k in ("actions", "labels", "school_changes"))
     dictionary, dictionary_path = validated["dictionary"], validated["dictionary_path"]
-    # Validation above is all-or-nothing. Dictionary is replaced inside the same
-    # protected writer operation; preserve its previous file for failure recovery.
-    if school_changes:
-        for row in school_changes:
-            update = {k: row.get(k, "") for k in ["raw_name", "normalized_key", "canonical_school_name", "action", "school_type", "school_sex", "school_district", "school_religion"]}
-            mask = dictionary["normalized_key"] == row["normalized_key"]
-            if mask.any():
-                for k, value in update.items():
-                    dictionary.loc[mask, k] = value
-            else:
-                dictionary = pd.concat([dictionary, pd.DataFrame([update])], ignore_index=True)
-        tmp = dictionary_path.with_name("school_dictionary.next.xlsx")
-        write_excel(tmp, {"Sheet1": dictionary})
-    else:
-        tmp = None
-    old_decisions = {d["payload"]["target_key"]: d["decision_id"] for d in active_decisions(db)}
+    # Initialised before any work, so the cleanup below always knows what to remove.
+    # Recovery may only use the backup this operation created, and only when this
+    # operation already replaced the live dictionary. A school_dictionary.previous
+    # file left behind by an earlier operation is never a recovery source.
+    tmp = None
+    previous = None
+    backed_up = False
+    replaced = False
     try:
+        # Validation above is all-or-nothing. Dictionary is replaced inside the same
+        # protected writer operation; preserve its previous file for failure recovery.
+        if school_changes:
+            for row in school_changes:
+                update = {k: row.get(k, "") for k in ["raw_name", "normalized_key", "canonical_school_name", "action", "school_type", "school_sex", "school_district", "school_religion"]}
+                mask = dictionary["normalized_key"] == row["normalized_key"]
+                if mask.any():
+                    for k, value in update.items():
+                        dictionary.loc[mask, k] = value
+                else:
+                    dictionary = pd.concat([dictionary, pd.DataFrame([update])], ignore_index=True)
+            tmp = dictionary_path.with_name("school_dictionary.next.xlsx")
+            write_excel(tmp, {"Sheet1": dictionary})
+        old_decisions = {d["payload"]["target_key"]: d["decision_id"] for d in active_decisions(db)}
         with db:
             for row in actions:
                 did = "DEC_" + digest(row)[:28]
@@ -275,15 +282,28 @@ def commit_review_rows(db, validated: dict, application: dict | None = None) -> 
                 db.execute("INSERT INTO review_applications VALUES(?,?,?)",
                            (application["batch_id"], utcnow(), dumps(application)))
             if tmp:
-                import shutil
                 previous = dictionary_path.with_name("school_dictionary.previous.xlsx")
                 shutil.copy2(dictionary_path, previous)
+                backed_up = True
                 tmp.replace(dictionary_path)
-    except Exception:
-        if tmp and dictionary_path.with_name("school_dictionary.previous.xlsx").exists():
-            import shutil
-            shutil.copy2(dictionary_path.with_name("school_dictionary.previous.xlsx"), dictionary_path)
+                replaced = True
+    except Exception as error:
+        # Only a dictionary this operation replaced is restored, and only from the
+        # backup this operation made. Otherwise the live dictionary is left exactly
+        # as it was.
+        if replaced and backed_up and previous is not None:
+            try:
+                shutil.copy2(previous, dictionary_path)
+            except OSError as restore_error:
+                raise PipelineError("School dictionary restore failed after the transaction was rolled back: " + str(restore_error)) from error
         raise
+    finally:
+        # Remove this operation's staging file without hiding the original error.
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
     return {"corrections": len(actions), "validation_labels": len(labels), "school_changes": len(school_changes)}
 
 
