@@ -1,5 +1,8 @@
 """Independent parent page. All data comes from the published release."""
 from .parent_panel import ADULT, CHILD, BRANCH_NAMES
+from .parent_panel_context import (PanelDetailFacts, PanelOverviewFacts, PanelStatisticsFacts,
+                                   joined_values, render_detail_panel, render_release_overview,
+                                   render_statistics_panel)
 from .parent_panel_views import (panel_cohort, pairs_for_cohort, read_panel,
                                  reconcile_panel, verify_panel)
 
@@ -55,6 +58,8 @@ def render_parent_panel(folder, summary):
     verify_panel(data, details)
     st.subheader('獨立家長分析')
     st.caption('不要求學生問卷作錨點。沿用已確認孩子身份；最早合資格家長回應為共同T0，T1至少相隔90日。這些數字另行計算，不加進首頁BD／E／F／EF。')
+    render_release_overview(PanelOverviewFacts(
+        note='第一項是選定的獨立家長 T0 回應數；後兩項是跨期組數。三項不是互斥分類，不能相加。'))
     counts = st.columns(3)
     for col, label, key in zip(counts, ['獨立家長基線', '同一孩子跨期（可換填卷人）', '同一成人跨期'],
                                ['baselines', 'child_report_pairs', 'same_adult_pairs']):
@@ -84,9 +89,11 @@ def render_parent_panel(folder, summary):
         scope_report, _ = filter_cohort(report_rows, mainstream=mainstream)
         unfiltered = report_rows[report_rows['wave'].eq(wave)]
         scope_rows = scope_report[scope_report['wave'].eq(wave)]
+        grouping_basis = (report_rows['grouping_anchor'].iloc[0] if len(report_rows) else '獨立家長T0所指孩子')
     else:
         unfiltered = panel_cohort(data['analysis'], branch, wave, paired_only)
         scope_rows = panel_cohort(data['analysis'], branch, wave, paired_only, mainstream)
+        grouping_basis = '逐輪欄位：各輪自身的學校、性別及來源（沒有固定 T0 分組）'
     filters = st.columns(4)
     gender = filters[0].selectbox('獨立樣本孩子性別', ['全部', '男', '女', '缺失'], key='ipp_gender')
     type_col = 'anchor_school_stage' if new_reports else 'school_type'
@@ -112,11 +119,20 @@ def render_parent_panel(folder, summary):
     else:
         rows = panel_cohort(data['analysis'], branch, wave, paired_only, mainstream,
                             None if gender == '全部' else {'男': '0', '女': '1', '缺失': ''}[gender], schools, types, sources)
-    metrics = st.columns(3)
-    metrics[0].metric('此輪未篩選 N', len(unfiltered))
-    metrics[1].metric('學校範圍後 N', len(scope_rows))
-    metrics[2].metric('目前獨立樣本 N', len(rows))
-    st.caption(f'學校範圍排除 {len(unfiltered)-len(scope_rows):,} 份，其餘篩選排除 {len(scope_rows)-len(rows):,} 份。N是此輪回應數。預設跨期樣本、全部學校且清除其他篩選，可重現上方對應跨期組數。')
+    render_detail_panel(PanelDetailFacts(
+        branch=BRANCH_NAMES.get(branch, branch),
+        scope=selected_scope or '（未選取）',
+        wave=wave,
+        school_scope='只限主流學校' if mainstream else '全部學校',
+        gender=gender,
+        school_types=tuple(types),
+        schools=tuple(schools),
+        sources=tuple(SOURCE_NAMES.get(v, v) for v in sources),
+        grouping_basis=grouping_basis,
+        unfiltered_n=len(unfiltered),
+        scope_n=len(scope_rows),
+        current_n=len(rows),
+        exclusion_note=f'學校範圍排除 {len(unfiltered)-len(scope_rows):,} 份，其餘篩選排除 {len(scope_rows)-len(rows):,} 份。N是此輪回應數。預設跨期樣本、全部學校且清除其他篩選，可重現上方對應跨期組數。'))
     st.subheader('配對明細')
     pairs = pairs_for_cohort(data['pairs'], rows, branch, wave)
     display = _pair_display(pairs, branch)
@@ -132,6 +148,24 @@ def render_parent_panel(folder, summary):
         from .descriptive_workbench import render_overview,render_workbench
         from .descriptive_dashboard import _capability
         reading=st.radio('獨立家長統計閱讀方式',['研究總覽','跨期比較','時段趨勢'],horizontal=True,key='ipp_reading')
+        from .descriptives import wave_counts
+        statistics_n=wave_counts(report_selected)
+        render_statistics_panel(PanelStatisticsFacts(
+            reading=reading,
+            branch=BRANCH_NAMES.get(branch, branch),
+            scope=selected_scope or '（未選取）',
+            school_scope='只限主流學校' if mainstream else '全部學校',
+            gender=gender,
+            conditions=(('學校類型', joined_values(types)),
+                        ('學校', joined_values(schools)),
+                        ('資料來源', joined_values([SOURCE_NAMES.get(v, v) for v in sources]))),
+            grouping_basis=grouping_basis,
+            n_t0=statistics_n['T0'],
+            n_t1=statistics_n['T1'],
+            notes=('明細輪次只控制明細及該輪回應下載；下方總覽及跨期統計使用現有的兩輪統計樣本。',
+                   '每項指標會另扣缺失；此處不是每項配對完整有效 N。',
+                   '孩子分支可換填卷人，其 PHQ 不能直接當作同一成人變化；是否可提供配對 PHQ 仍由既有成人連續性檢查決定，不能以分支名稱當作證據。',
+                   '時段趨勢還有自己的輪次及日期控制，此摘要 N 尚未套用它們，期間內 N 在趨勢區另列。')))
         metadata={'branch':branch,'paired_only':paired_only,'mainstream':mainstream,
                   'gender':gender,'schools':schools,'sources':sources,'school_types':types}
         if reading=='研究總覽':
