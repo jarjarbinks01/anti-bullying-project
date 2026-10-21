@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from .dashboard_views import SOURCE_NAMES
+from .descriptive_context import AnalysisContext, render_analysis_context
 from .descriptive_spec import GROUPS, MODES, REPORT_FILES, SECTIONS, STATUS_LABELS, VERSION
 from .descriptives import (cohort, display_table, filter_cohort, paired_changes,
                            statistics, wave_counts)
@@ -155,19 +156,20 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
     filters=dict(mainstream=main,schools=schools,sources=sources,rules=rules,group=group)
     selected,counts=filter_cohort(rows,**filters)
     n=wave_counts(selected)
-    st.metric('日期篩選前 T0／T1 N' if reading=='時段趨勢' else '目前 T0／T1 N',f"{n['T0']:,} / {n['T1']:,}")
     anchor=rows['grouping_anchor'].iloc[0] if len(rows) else '此模式既定錨點'
-    st.caption(f"{MODES[mode]}；{'學生' if role=='student' else '家長'}；{'主流學校' if main else '全部學校'}；{GROUPS[group]}。分組依據：{anchor}。")
-    active=[]
-    for label,value in [('學校',schools),('來源',sources),('身份規則',rules)]:
-        if value:active.append(label+'：'+('、'.join(value if label=='學校' else [SOURCE_NAMES.get(v,v) if label=='來源' else rule_names.get(v,v) for v in value])))
-    st.caption('目前篩選：'+('；'.join(active) if active else '無進階篩選')+'。')
+    applied=[]
+    for label,value,names in [('學校',schools,None),('資料來源',sources,SOURCE_NAMES),('孩子身份配對規則',rules,rule_names)]:
+        if value:applied.append((label,'、'.join(value if names is None else [names.get(v,v) for v in value])))
     if paired:
-        st.caption('這是明確選定的正式跨期樣本。與總覽的各輪 A–D／E–F 人數可能不同；指標缺失另扣。BD 使用其實際選定 T1。')
+        reminder='這是明確選定的正式跨期樣本。與總覽的各輪 A–D／E–F 人數可能不同；指標缺失另扣。BD 使用其實際選定 T1。'
     elif reading=='時段趨勢':
-        st.caption('以下按填卷日期篩選正式選定回應，輪次不重新選取；每期各自有效回答，完整設定及下載標示 calendar_response。')
+        reminder='以下按填卷日期篩選正式選定回應，輪次不重新選取；每期各自有效回答，完整設定及下載標示 calendar_response。'
     else:
-        st.caption('兩輪各自有效回答。A–D／E–F 可以不同人；逐人變化請明確選取「跨期比較」的樣本及新 N。完整設定及下載標示 wave_valid。')
+        reminder='兩輪各自有效回答。A–D／E–F 可以不同人；逐人變化請明確選取「跨期比較」的樣本及新 N。完整設定及下載標示 wave_valid。'
+    render_analysis_context(AnalysisContext(
+        reading=reading,sample=MODES[mode],respondent='學生' if role=='student' else '家長',
+        school_scope='主流學校' if main else '全部學校',group=GROUPS[group],anchor=anchor,
+        n_t0=n['T0'],n_t1=n['T1'],applied=tuple(applied),reminder=reminder))
     with st.expander('核對口徑、逐步排除數及資料版本'):
         st.write({'發布版本':summary['release_id'],'報表版本':VERSION,'分組依據':anchor,'完整篩選':filters})
         detail=counts.copy()
