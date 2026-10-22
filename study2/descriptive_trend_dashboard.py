@@ -10,7 +10,7 @@ from .descriptive_workbench import DETAIL_FAMILIES, _family_variables, select_va
 
 
 def cached_trends(rows, role, release_id, **settings):
-    import streamlit as st
+    from .english_ui import st
 
     @st.cache_data(show_spinner=False, max_entries=48)
     def compute(data, who, release, policy_version, options):
@@ -20,7 +20,7 @@ def cached_trends(rows, role, release_id, **settings):
 
 
 def render_trends(rows, role, release_id, *, prefix, metadata=None):
-    import streamlit as st
+    from .english_ui import st
 
     st.subheader('時段趨勢')
     st.caption('按香港填卷日期查看已發布的正式選定回應。各時段填卷者可以不同；學校、來源及樣本組成可能影響數值，不能解讀為逐人變化或研究效果。')

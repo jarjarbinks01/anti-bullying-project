@@ -18,6 +18,7 @@ EXACT_PATHS = {
     'requirements.lock.txt', 'dashboard.py', 'config.example.json',
     'Prepare Batch.command', 'Run Pipeline.command', 'Start Dashboard.command',
     'Export Review.command', 'Review Centre.command', 'Dyad Centre.command',
+    'Export Static Dashboard.command',
     '.githooks/pre-commit', '.githooks/pre-push',
     'tools/repository_guard.py', 'tools/qa/synthetic_review.py',
     'tools/qa/review_workbook.mjs',
@@ -26,6 +27,7 @@ EXACT_PATHS = {
     'docs/REPOSITORY.md', 'docs/DYAD_TRACKING_OPERATIONS.md', 'docs/CODE_READING_GUIDE.md',
     'docs/INDEPENDENT_PARENT_ANALYSIS.md',
     'docs/DESCRIPTIVE_ANALYSIS.md',
+    'docs/STATIC_RESEARCHER_DASHBOARD.md',
 }
 PYTHON_DIRECTORIES = {'study2', 'tests', 'mappings'}
 TEMPLATE_PATH = 'study2/assets/review_template.xlsx'

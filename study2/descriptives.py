@@ -208,6 +208,8 @@ def paired_changes(rows, role, groups=('all',), release_id=''):
     permitted = mode in {'acbd', 'efmatched', 'independent_same_adult', 'independent_child_report'}
     if not permitted:
         return pd.DataFrame()
+    if rows[['child_id', 'wave']].isna().any().any() or rows.duplicated(['child_id', 'wave']).any():
+        raise PipelineError('Paired comparison requires one submission per child and wave')
     records = []
     for group in groups:
         grouped = group_rows(rows, group)
@@ -224,12 +226,35 @@ def paired_changes(rows, role, groups=('all',), release_id=''):
             records.append(dict(release_id=release_id, report_version=VERSION, mode=mode, role=role,
                 group=group, group_label=GROUPS[group], variable_id=var.key, variable=var.label, unit=var.unit,
                 pairs_n=len(units), paired_valid_n=len(delta), paired_missing_n=len(units)-len(delta),
-                mean_change=delta.mean() if len(delta) else None, sd_change=delta.std(ddof=1) if len(delta)>1 else None))
+                mean_change=delta.mean() if len(delta) else None, sd_change=delta.std(ddof=1) if len(delta)>1 else None,
+                **paired_inference(delta)))
     result = pd.DataFrame(records)
-    for key in ['mean_change', 'sd_change']:
+    for key in ['mean_change', 'sd_change', 'p_value', 'cohen_dz']:
         if key in result:
             result[key] = pd.to_numeric(result[key], errors='coerce').astype(float)
     return result
+
+
+def paired_inference(delta):
+    """Two-sided paired t-test and dz from the same complete-pair differences.
+
+    Difference direction is T1 minus T0. P-values are exploratory and unadjusted.
+    No test/effect is estimated for fewer than two pairs or zero difference SD;
+    those cases retain their mean difference without fabricating a finite dz.
+    """
+    from scipy.stats import t
+
+    values = np.asarray(delta, dtype=float)
+    if not np.isfinite(values).all():
+        raise PipelineError('Paired inference received nonfinite differences')
+    if len(values) < 2:
+        return dict(p_value=None, cohen_dz=None, inference_status='insufficient_pairs')
+    deviation = float(values.std(ddof=1))
+    if deviation == 0:
+        return dict(p_value=None, cohen_dz=None, inference_status='zero_change_variance')
+    dz = float(values.mean() / deviation)
+    p_value = float(2 * t.sf(abs(dz * np.sqrt(len(values))), df=len(values)-1))
+    return dict(p_value=p_value, cohen_dz=dz, inference_status='estimated')
 
 
 def formatted(row):

@@ -239,7 +239,7 @@ def test_workbench_controls_all_types_and_role_protection(inputs):
     assert not app.exception
     figure=json.loads(app.get('plotly_chart')[0].proto.spec)
     assert [t['xaxis'] for t in figure['data']]==['x','x2']
-    assert any('T0在上、T1在下' in c.value for c in app.caption)
+    assert any('T0 above, T1 below' in c.value for c in app.caption)
     app.radio(key='test_view').set_value('逐人變化').run()
     assert not app.exception
     app.selectbox(key='test_variable_efmatched_parent').set_value('TBV_prevalence2').run()

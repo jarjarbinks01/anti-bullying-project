@@ -80,7 +80,7 @@ def render_results(rows, role, release_id, *, prefix, section='scales', groups=(
 
 
 def _reset(prefix, homepage=False):
-    import streamlit as st
+    from .english_ui import st
     for name in ('schools','sources','rules','types'):
         st.session_state[prefix+'_'+name]=[]
     st.session_state[prefix+'_group']='all'
@@ -88,7 +88,7 @@ def _reset(prefix, homepage=False):
 
 
 def _capability(folder,summary):
-    import streamlit as st
+    from .english_ui import st
     from .descriptive_exploration_outputs import available
     from .common import file_hash
     @st.cache_data(show_spinner=False)
@@ -99,7 +99,7 @@ def _capability(folder,summary):
 
 
 def _legacy(folder,summary,frame,parents):
-    import streamlit as st
+    from .english_ui import st
     st.info('此歷史版本未包含新版 4.1 人口特徵及並排報表，未提供時段趨勢。以下保留舊量表統計。')
     from .dashboard_views import analysis_cohort
     from .outputs import descriptive_summary
@@ -111,7 +111,7 @@ def _legacy(folder,summary,frame,parents):
 
 
 def render_descriptive(folder,summary,frame,parents,rule_names):
-    import streamlit as st
+    from .english_ui import st
     from .descriptive_workbench import render_overview,render_workbench
     folder=Path(folder)
     if (not summary.get('descriptive') or not (folder/'descriptive_measurements.parquet').exists()

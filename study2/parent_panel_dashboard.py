@@ -44,7 +44,7 @@ def _pair_display(pairs, branch):
 
 
 def render_parent_panel(folder, summary):
-    import streamlit as st
+    from .english_ui import st
     from pathlib import Path
     import pandas as pd
     from .dashboard_views import SOURCE_NAMES
@@ -186,7 +186,7 @@ def render_parent_panel(folder, summary):
 
 
 def _legacy_statistics(rows):
-    import streamlit as st
+    from .english_ui import st
     from .outputs import descriptive_summary
     st.info('此歷史版本未包含新版人口特徵，未提供時段趨勢；以下沿用舊量表摘要。')
     gender_counts = rows['gender'].fillna('').astype(str).map({'0': '男', '1': '女', '': '缺失'}).fillna('其他').value_counts().rename_axis('孩子性別').reset_index(name='回應數')
@@ -205,7 +205,7 @@ def _legacy_statistics(rows):
 
 
 def _render_panel_audit(data, details):
-    import streamlit as st
+    from .english_ui import st
     with st.expander('成人電話差一位試算及核實狀態'):
         st.warning('以下是未納入正式同一成人樣本的規則試算，不是已確認配對或準確率。人工限制、出生年份及整組矛盾檢查仍然有效。')
         import pandas as pd

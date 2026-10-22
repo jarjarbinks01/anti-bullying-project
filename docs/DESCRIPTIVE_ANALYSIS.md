@@ -162,3 +162,127 @@ BMI只在身高與體重均在已確認範圍內時，以kg／米平方計算連
 驗收需逐筆比對原正式樣本、獨立家長選定 ID、分數、來源及人工歷史。另測試分母、缺失、升中、BD 特有選取、換家長、空群組、全缺失及匯出失敗保留舊版本；程式通過之外仍需實際檢查瀏覽器與每張 Excel 工作表。
 
 家長 PHQ 跨期比較須由正式同一成人樣本證明連續性。`acbd` 名稱本身不是證據；若缺少 `parent_longitudinal.parquet` 而退回同一孩子家長回應，停用 PHQ 總分、分量表及分類的配對比較。各輪描述統計仍保留。固定報表與 dashboard 共用此檢查。
+
+## Static G1/G2 numeric output (`study2_g12_v1`)
+
+The static exporter adds a fixed projection of the existing exploration results;
+it does not change scoring, identity, wave selection or statistical definitions.
+For every supported source, school scope and group, continuous paired rows keep
+the original inference and add the following availability detail:
+
+| Field | Meaning |
+|---|---|
+| `pairs_n` | Formal units whose two exact selected submission/version slots are in scope |
+| `paired_valid_n` | Valid for this metric in both waves |
+| `only_t0_valid_n`, `only_t1_valid_n`, `both_missing_n` | The other three mutually exclusive availability states |
+| `paired_missing_n` | Formal N minus both-valid N, not either wave's missing N |
+| `t0_mean`, `t1_mean` | Means of exactly the same per-metric both-valid pairs |
+| `mean_change`, `sd_change`, `p_value`, `cohen_dz`, `inference_status` | Original paired calculation, without display rounding |
+| `pair_detail_status` | `available`, `not_provided` or `suppressed` |
+
+The four state counts sum to formal N when detail is available. T1 paired mean
+minus T0 paired mean equals mean change. Each-wave overview means can differ
+because their valid respondents can differ. The overview audit shows both bases
+in separate columns. It also shows sample, valid, missing and outside-range N:
+sample N = valid N + missing N, and outside-range N is included in missing N.
+
+The overview paired block intersects displayed submissions with the formal
+reference using submission and version together, after applying each displayed
+group. It never substitutes the overview's parent T1 for the formal BD slot.
+The all-independent-parent overview uses the formal same-child branch as its
+paired reference and keeps its unpaired baselines in its per-wave columns.
+Parent PHQ retains the original whole-cohort adult-continuity gate before any
+complete-slot restriction. Missing score columns or legacy minimal callers
+without exploration anchor metadata retain original inference but mark new
+detail `not_provided`; the interface does not fill it from wave means.
+
+Minimum zero remains the researcher default. With an explicit positive minimum,
+any positive small availability state suppresses the whole paired numeric
+partition, including both means and original inference. Its paired histogram
+also hides counts and edges so the same protected both-valid N is not repeated
+in a download. Zero is still zero; unavailable and suppressed values remain
+distinct. This does not claim to prevent every cross-projection differencing
+attack. The accepted first-tab exact-scope guard remains unchanged.
+
+CSV downloads contain raw numeric columns separately from formatted display
+columns. They never parse rounded labels back into numbers. Per-row variable ID,
+label and category code retain their identity. Fixed metadata includes release,
+snapshot time, report/dictionary/inference/projection versions, mode, respondent,
+school/source/group scope, grouping/source anchors and the result basis.
+`selection_variable` is separate from a row's metric; overview tests retain
+`test_basis=paired_valid` alongside `basis=wave_valid`. Missing old metadata is
+explicitly `not_provided`, rather than borrowed from another release.
+
+Histogram CSV uses the currently plotted bins and a valid denominator summed
+from those numeric bins only when all are visible. It remains all-source only.
+Period and monthly CSV retain numeric mean, SD and available counts, effective
+complete-month endpoints, Hong Kong timezone and batch-date inclusion. Periods
+remain all-source/all-group, calendar-response summaries with no paired test.
+No new histogram variables, quantiles, grade projection, daily boundaries or
+research records are added to the public payload.
+
+## Optional grade multi-select (protected researcher minimum0)
+
+The descriptive and independent-parent tabs offer P1–P6, S1–S6 and Unknown.
+All includes Unknown and uses the existing published views unchanged. Known
+grades excludes Unknown. No grades is an empty selection: sample/valid counts
+are zero and undefined numerical summaries remain unavailable. Repeated choices
+do not duplicate participants. These controls do not affect the first tab.
+
+Per-wave student grade comes from the selected student response. Per-wave
+student-anchored parent grade comes from the unique corresponding selected
+student. Formal AC, actual BD and EF use selected student baseline grade for
+both waves. Independent-parent branches use the selected parent's reported
+child grade at each wave, or at independent baseline for longitudinal views.
+Existing gender/school/source anchors remain unchanged. CSV includes the grade
+anchor separately, including when it differs from the parent grouping anchor.
+
+Grade requires the existing cleaned integer 1–6 and published valid school stage
+status. Invalid, conflicting or missing values, or ambiguous/missing student
+linkage, become Unknown. Neither stage nor baseline grade is inferred from age,
+promotion, another respondent or follow-up. A nonempty legacy artifact without
+the required fields has unavailable custom-grade capability, while All remains
+usable. An empty supported cohort is genuine zero.
+
+`snapshot.grade` declares `study2_descriptive_grade_v1`, the protected researcher
+profile and matching release/report/dictionary versions. Each `view.grade`
+partitions its existing group/source/school/mode projection into the 13 disjoint
+grade cells. `statistics_schema` and `pairs_schema` define stable metric keys;
+`statistic_fields` and `pair_fields` name the numeric vector columns. Each cell
+has explicit T0/T1 sample counts. A cell empty in both waves has null vectors,
+an explicit zero representation under those schemas. Missing cells are invalid,
+not an empty selection. The existing column-table snapshot and protected app
+assets carry the capability; no record IDs or membership arrays are exported.
+
+Wave cells retain sample/valid/missing/outside-range counts, numeric mean and
+centred sum of squares M2, or categorical numerator/denominator. Formal pair
+cells retain G1 availability states, metric-specific complete-pair T0/T1 moments
+and difference moments. Only G1-confirmed available pair details are projected.
+Whole-scope adult PHQ eligibility is fixed before grade partitioning; selecting
+a smaller grade subset cannot enable an ineligible parent PHQ result.
+
+Custom subsets combine counts and weighted moments, including between-cell
+variation: combined M2 is the sum of each cell's M2 plus
+`n_cell * (mean_cell - combined_mean)^2`. Sample SD is `sqrt(M2/(n-1))` for n>1;
+one-response means remain visible, while their undefined SD is unavailable.
+Paired change combines per-person difference moments on complete pairs, not
+the difference between separately valid wave means. No valid small result is
+masked in the minimum0 researcher profile.
+
+Custom per-wave overview disables the entire paired block, including availability,
+complete-pair means, differences and inference: no joint T0/T1-grade cube exists.
+Select the explicit longitudinal view for stable baseline-grade comparisons.
+Custom longitudinal p-values/dz, grade-filtered monthly trends, distributions
+and transitions are unavailable in this minimum version. No All-grade result
+is substituted under a custom label. All retains its accepted inference,
+histograms and period views.
+
+CSV retains G2 raw precision, metric identity, basis and public metadata, adding
+canonical `filter_grade_codes`, stable `grade_anchor` and `grade_format`.
+Display anchor labels are English. All outputs for a custom selection use the
+same validated pooled result. Invalid/missing capabilities clear custom result
+and download UI; selecting All explicitly restores the published aggregate view.
+The browser independently checks active policy, supported versions, complete
+unique cells, finite moments and count/moment reconciliation. Positive-threshold
+legacy callers omit the entire header and all grade data; this compatibility
+boundary adds no masking to the minimum0 researcher configuration.

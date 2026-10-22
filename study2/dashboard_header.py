@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-import streamlit as st
+from .english_ui import st
 
 TITLE = "Study 2 研究資料"
 SHORT_NOTE = "本機研究原型 · 每項統計顯示有效樣本及缺失數"

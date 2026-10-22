@@ -69,7 +69,7 @@ def test_all_modes_controls_reset_and_population_tables(inputs,tmp_path):
     assert not app.exception and app.selectbox(key="ds_mainstream").value is True
     app.radio(key="ds_reading").set_value("跨期比較").run()
     assert not app.exception and app.info
-    assert "此發布未提供跨期探索能力" in app.info[0].value
+    assert "This release does not support longitudinal exploration" in app.info[0].value
 
 
 @pytest.mark.parametrize('version_one',[False,True])
