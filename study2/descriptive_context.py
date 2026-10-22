@@ -7,7 +7,7 @@
 """
 from dataclasses import dataclass
 
-import streamlit as st
+from .english_ui import st
 
 CONTEXT_TITLE = "目前分析"
 APPLIED_TITLE = "已套用條件"

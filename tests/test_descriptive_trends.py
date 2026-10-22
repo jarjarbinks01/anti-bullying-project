@@ -231,14 +231,14 @@ def test_shared_ui_controls_families_dates_empty_sample_and_batch_recovery():
     app.selectbox(key='trend_family').set_value('FQOL').run()
     assert not app.exception and len(app.get('plotly_chart')) == 6
     app.selectbox(key='trend_family').set_value('bullying').run()
-    assert any('回顧過去三個月' in c.value for c in app.caption)
+    assert any('recall the past three months' in c.value for c in app.caption)
     app.selectbox(key='trend_family').set_value('demographics').run()
     assert not app.exception
     app.selectbox(key='trend_waves').set_value('T1').run()
-    assert app.metric[0].value == '未選取'
+    assert app.metric[0].value == 'Not selected'
     app.selectbox(key='trend_waves').set_value('both').run()
     app.checkbox(key='only_batch').check().run()
-    assert not app.exception and any('沒有可用填卷日期' in i.value for i in app.info)
+    assert not app.exception and any('No usable response dates' in i.value for i in app.info)
     app.selectbox(key='trend_batch').set_value(True).run()
     assert not app.exception
     assert app.date_input(key='trend_dates').value == (date(2025,8,1),date(2025,8,1))
@@ -253,7 +253,7 @@ def test_unsupported_release_ui_explains_missing_fields_without_fallback():
         +'rows=pd.read_json(io.StringIO('+repr(rows.to_json(orient='table'))+'),orient="table")\n'
         'render_trends(rows,"student","old",prefix="unsupported")',default_timeout=30).run()
     assert not app.exception
-    assert any('observed_at' in i.value and '不讀取其他版本' in i.value for i in app.info)
+    assert any('observed_at' in i.value and 'does not supplement the release' in i.value for i in app.info)
     assert not app.date_input and not app.get('plotly_chart')
 
 
@@ -277,7 +277,7 @@ def test_both_page_entrypoints_keep_samples_filters_and_adult_guard(project):
     app.multiselect(key='ds_sources').set_value(['legacy_online']).run()
     app.radio(key='ds_reading').set_value('時段趨勢').run()
     assert not app.exception
-    assert app.metric[0].label == '日期篩選前 T0／T1 N'
+    assert app.metric[0].label == 'T0 / T1 N before date filtering'
     assert app.multiselect(key='ds_sources').value == ['legacy_online']
     assert [m.value for m in app.metric[1:]] == ['1','1']
     app.selectbox(key='ds_role').set_value('parent').run()

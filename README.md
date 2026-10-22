@@ -6,6 +6,103 @@ The [descriptive analysis guide](docs/DESCRIPTIVE_ANALYSIS.md) explains the four
 
 **This repository contains code, generic documentation, synthetic tests and a blank Excel layout. Research data stays local.** No participant responses, databases, filled review cards, source manifests, published results, screenshots or machine-specific settings are included.
 
+## Static dashboard for Vercel
+
+After publishing a validated research release, run:
+
+```sh
+./.venv/bin/python -m study2 static-export
+```
+
+Alternatively, open `Export Static Dashboard.command`. The exporter reads the
+current published release without writing the research databases. It creates
+`static_dashboard/`, which is ignored by Git. Open its `index.html` to preview
+locally. HTML, CSS, JavaScript and the aggregate snapshot are self-contained;
+the research calculations and databases remain local. Web deployment now adds
+Vercel Routing Middleware and a small authentication Function. A plain static
+HTTP server does not enforce the access gate.
+
+Deploy **only this generated directory**, never the research checkout:
+
+```sh
+cd static_dashboard
+npx vercel
+```
+
+Use the **Other** framework preset, Node 24.x, `npm ci --ignore-scripts` for
+installation, `npm run build` for the build and `public` as output.
+`vercel.json` supplies these settings. Set `STUDY2_ACCESS_PASSWORD` (12–256
+characters) and `STUDY2_SESSION_SECRET` (at least 32 random characters) as
+server-only environment variables for Production and Preview before deployment.
+Neither value is stored in the export or browser. Missing configuration fails
+closed. The shared login lasts eight hours and includes logout. All routes,
+including the snapshot and JSON files, pass through the access check.
+The build copies only allowlisted browser assets into `public`; server code
+stays outside that output directory. Deploy the entire generated project,
+including its middleware and API, rather than the `public` subfolder alone.
+
+Read the generated [deployment guide](static_dashboard/DEPLOYMENT.md) for
+account linking, secret setup, preview checks, production deployment and updates.
+Use `npx vercel --prod` when ready for a production deployment. A separate static
+repository can be created from this directory if Git-based deployment is wanted;
+the research repository intentionally does not track generated research outputs.
+Publishing a new pipeline release does not update the website: export again and
+redeploy. A local `.vercel` project association survives repeat exports.
+
+The static version preserves the six navigation tabs, published sample counts,
+stage purposes, source counts, formal descriptive cohorts, independent-parent
+cohorts, mean/SD and categorical tables, paired changes, scale histograms and
+calendar-month trends. Statistics reuse the existing shared calculation layer.
+Available filters are role, cohort, mainstream/all schools, nine child groups and
+one source. Histograms cover all sources; monthly trends cover the all-group,
+all-source view and offer optional accepted batch dates. Month controls select
+whole precomputed periods, not arbitrary daily ranges. Per-school and identity
+rule filters, record-level evidence, invitation histories and review writes stay
+in the local application. Aggregate CSV downloads describe the current view.
+
+The static interface keeps sample filters in a separate analysis sidebar and
+shows the selected cohort, wave counts and analysis basis above the results.
+Research overviews offer grouped PHQ/FQOL/SEC/bullying comparison tables,
+distributions and mean-score charts as separate views. Paired comparisons keep
+formal and valid pair counts distinct. The homepage groups processing stages
+by purpose and labels their units; differences between imported and selected
+responses are not treated as invalid submissions. These layouts are part of
+the export template and survive future exports.
+
+Continuous scale tables also show a two-sided paired t-test, Cohen's dz
+(mean individual T1 minus T0 change divided by its sample SD) and the actual
+complete-pair N. These are unadjusted exploratory comparisons, not tests on
+the difference between the displayed each-wave means. Each-wave overviews use
+only exact submission/version intersections with formal AC/BD or EF membership;
+both responses must pass the displayed filters. Parent PHQ still requires
+confirmed adult continuity. Categorical outcomes do not receive t-tests.
+Zero difference variance and insufficient pairs retain their descriptive values
+without inventing a p-value or finite effect size. Missing counts remain in
+the audit details and CSV rather than the main comparison table.
+
+The period view combines the selected complete months into two points, T0 and
+T1. Means are weighted by valid N; SD combines within-month and between-month
+variation from the full-precision published summaries. The researcher export
+does not suppress small aggregate cells or merge rare histogram bins. The
+period view defaults to the full date range and includes every selected month,
+including months with fewer than ten responses. Missing scores remain missing;
+an undefined SD, p-value or effect size is not replaced with zero. The
+two-point view compares responses within the selected period;
+it does not imply individual change or supply a paired test. Monthly audit
+details remain available. The y-axis offers full scale and labelled auto-zoom.
+The comparison implementation is identified by `paired_t_dz_v1` in the snapshot.
+Methods: [SciPy paired t-test](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_rel.html)
+and [Lakens on effect sizes for paired designs](https://doi.org/10.3389/fpsyg.2013.00863).
+
+Only explicitly allowed aggregate fields reach the output. No submissions,
+child/family IDs, schools, contacts, birthdays, local paths, source filenames,
+raw answers or filled review packages are copied. The researcher version keeps
+small aggregate counts and categories, and quality missing counts remain
+visible. Histograms use fixed public scale bounds and common T0/T1 boundaries;
+personal extremes and free-text missing-reason detail are excluded. Everything in a deployed
+snapshot is downloadable by authenticated researchers. The server gate controls
+new web requests; noindex and browser security headers alone are not authentication.
+
 ## Install
 
 Requires Python 3.12 or later. Run inside this repository:

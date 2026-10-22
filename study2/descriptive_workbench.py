@@ -32,7 +32,7 @@ def _family_variables(role, family):
 
 
 def cached_explore(rows,role,groups,release_id,*,paired=False,selected_variables=None,metadata=None):
-    import streamlit as st
+    from .english_ui import st
     @st.cache_data(show_spinner=False,max_entries=48)
     def compute(data,who,split,release,capability_version,complete,chosen,filters):
         return explore(data,who,split,release,paired=complete,selected_variables=chosen,metadata=filters)
@@ -129,7 +129,7 @@ def downloads(st, result, prefix, *, stats=None, scale_family=None):
 
 
 def render_overview(rows,role,release_id,*,prefix,groups=('all',),metadata=None):
-    import streamlit as st
+    from .english_ui import st
     result=cached_explore(rows,role,groups,release_id,metadata=metadata)
     stats=statistics(rows,role,groups,release_id)
     stats['basis']='wave_valid';stats['filters_json']=json.dumps(result['metadata'],ensure_ascii=False,sort_keys=True)
@@ -200,7 +200,7 @@ def _availability(st,stats):
 
 
 def render_workbench(rows,role,release_id,*,prefix,metadata=None):
-    import streamlit as st
+    from .english_ui import st
     options=comparison_variables(mode_of(rows),role,rows)
     if not options:
         st.info('先選擇正式跨期樣本，才可比較同一批單位。')

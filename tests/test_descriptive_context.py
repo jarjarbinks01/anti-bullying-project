@@ -10,6 +10,7 @@ from streamlit.testing.v1 import AppTest
 from study2.descriptive_context import (APPLIED_TITLE, CONTEXT_TITLE, N_EXPLANATION, NO_ADVANCED_FILTER,
                                         N_LABEL_OVERVIEW, N_LABEL_TREND, AnalysisContext, n_label, n_value)
 from study2.descriptive_reports import write_reports
+from study2.english_ui import english
 from test_descriptives import inputs
 
 LONG_SCHOOL = '香海正覺蓮社佛教黃藻森學校（深水埗）、聖公會聖馬利亞堂莫慶堯中學（九龍城）'
@@ -55,18 +56,18 @@ def captions_of(app):
 def test_case_a_overview_card_shows_analysis_setting_n_and_reminder():
     app = render(context())
     assert not app.exception
-    assert [s.value for s in app.subheader] == [CONTEXT_TITLE]
+    assert [s.value for s in app.subheader] == [english(CONTEXT_TITLE)]
     captions = captions_of(app)
-    assert '閱讀方式：研究總覽' in captions
-    assert '分析樣本：各輪全部樣本（A／B／C／D）' in captions
-    assert '填卷對象：學生' in captions
-    assert '學校範圍：主流學校' in captions
-    assert '孩子分組：全部' in captions
-    assert '分組依據：該輪回應' in captions
-    assert N_EXPLANATION in captions
-    assert NO_ADVANCED_FILTER in captions
-    assert OVERVIEW_REMINDER in captions
-    assert [(m.label, m.value) for m in card_of(app).metric] == [(N_LABEL_OVERVIEW, '2,547 / 2,310')]
+    assert english('閱讀方式：研究總覽') in captions
+    assert english('分析樣本：各輪全部樣本（A／B／C／D）') in captions
+    assert english('填卷對象：學生') in captions
+    assert english('學校範圍：主流學校') in captions
+    assert english('孩子分組：全部') in captions
+    assert english('分組依據：該輪回應') in captions
+    assert english(N_EXPLANATION) in captions
+    assert english(NO_ADVANCED_FILTER) in captions
+    assert english(OVERVIEW_REMINDER) in captions
+    assert [(m.label, m.value) for m in card_of(app).metric] == [(english(N_LABEL_OVERVIEW), '2,547 / 2,310')]
 
 
 def test_case_a_card_is_directly_visible_and_not_hidden_in_an_expander():
@@ -82,10 +83,10 @@ def test_case_b_applied_conditions_are_all_visible_with_full_names():
     app = render(context(applied=applied))
     assert not app.exception
     captions = captions_of(app)
-    assert any(APPLIED_TITLE in m.value for m in card_of(app).markdown)
+    assert any(english(APPLIED_TITLE) in m.value for m in card_of(app).markdown)
     for label, value in applied:
-        assert f'{label}：{value}' in captions
-    assert NO_ADVANCED_FILTER not in captions
+        assert english(f'{label}：{value}') in captions
+    assert english(NO_ADVANCED_FILTER) not in captions
     # 條件沒有被省略號或截斷遮去
     text = '\n'.join(captions)
     assert LONG_SCHOOL in text
@@ -97,19 +98,19 @@ def test_case_c_reminder_is_shown_verbatim_for_the_paired_sample():
     app = render(context(reading='跨期比較', sample='同一人跨期樣本（AC／BD）',
                           anchor='學生T0', reminder=PAIRED_REMINDER))
     captions = captions_of(app)
-    assert PAIRED_REMINDER in captions
-    assert OVERVIEW_REMINDER not in captions
+    assert english(PAIRED_REMINDER) in captions
+    assert english(OVERVIEW_REMINDER) not in captions
 
 
 def test_case_d_trend_reading_marks_the_count_as_before_date_filter():
     app = render(context(reading='時段趨勢', reminder=TREND_REMINDER))
-    assert [(m.label, m.value) for m in card_of(app).metric] == [(N_LABEL_TREND, '2,547 / 2,310')]
-    assert TREND_REMINDER in captions_of(app)
+    assert [(m.label, m.value) for m in card_of(app).metric] == [(english(N_LABEL_TREND), '2,547 / 2,310')]
+    assert english(TREND_REMINDER) in captions_of(app)
 
 
 def test_case_e_zero_sample_is_shown_as_zero_without_inventing_counts():
     app = render(context(n_t0=0, n_t1=0))
-    assert [(m.label, m.value) for m in card_of(app).metric] == [(N_LABEL_OVERVIEW, '0 / 0')]
+    assert [(m.label, m.value) for m in card_of(app).metric] == [(english(N_LABEL_OVERVIEW), '0 / 0')]
 
 
 # --- 純邏輯 ---
@@ -158,16 +159,16 @@ def test_case_f_card_is_wired_into_the_descriptive_page(inputs, tmp_path):
     summary = build_release(tmp_path / 'synthetic-release', f, p, m)
     app = descriptive_app(tmp_path / 'synthetic-release', summary)
     assert not app.exception
-    assert CONTEXT_TITLE in [s.value for s in app.subheader]
+    assert english(CONTEXT_TITLE) in [s.value for s in app.subheader]
     captions = captions_of(app)
-    assert '分析樣本：各輪全部樣本（A／B／C／D）' in captions
-    assert '填卷對象：學生' in captions
-    assert '學校範圍：主流學校' in captions
-    assert '孩子分組：全部' in captions
-    assert '分組依據：該輪回應' in captions
-    assert NO_ADVANCED_FILTER in captions
-    assert OVERVIEW_REMINDER in captions
-    assert [(m.label, m.value) for m in card_of(app).metric] == [(N_LABEL_OVERVIEW, '2 / 2')]
+    assert english('分析樣本：各輪全部樣本（A／B／C／D）') in captions
+    assert english('填卷對象：學生') in captions
+    assert english('學校範圍：主流學校') in captions
+    assert english('孩子分組：全部') in captions
+    assert english('分組依據：該輪回應') in captions
+    assert english(NO_ADVANCED_FILTER) in captions
+    assert english(OVERVIEW_REMINDER) in captions
+    assert [(m.label, m.value) for m in card_of(app).metric] == [(english(N_LABEL_OVERVIEW), '2 / 2')]
 
 
 def test_case_f_applied_conditions_appear_in_the_card_without_changing_n(inputs, tmp_path):
@@ -177,9 +178,9 @@ def test_case_f_applied_conditions_appear_in_the_card_without_changing_n(inputs,
     app.multiselect(key='ds_sources').set_value(['qualtrics']).run()
     assert not app.exception
     captions = captions_of(app)
-    assert '資料來源：Qualtrics' in captions
-    assert NO_ADVANCED_FILTER not in captions
-    assert [(m.label, m.value) for m in card_of(app).metric] == [(N_LABEL_OVERVIEW, '2 / 2')]
+    assert english('資料來源：Qualtrics') in captions
+    assert english(NO_ADVANCED_FILTER) not in captions
+    assert [(m.label, m.value) for m in card_of(app).metric] == [(english(N_LABEL_OVERVIEW), '2 / 2')]
 
 
 def test_case_f_paired_reading_shows_the_paired_reminder(inputs, tmp_path):
@@ -189,9 +190,9 @@ def test_case_f_paired_reading_shows_the_paired_reminder(inputs, tmp_path):
     app.radio(key='ds_reading').set_value('跨期比較').run()
     assert not app.exception
     captions = captions_of(app)
-    assert PAIRED_REMINDER in captions
-    assert OVERVIEW_REMINDER not in captions
-    assert '分析樣本：同一人跨期樣本（AC／BD）' in captions
+    assert english(PAIRED_REMINDER) in captions
+    assert english(OVERVIEW_REMINDER) not in captions
+    assert english('分析樣本：同一人跨期樣本（AC／BD）') in captions
 
 
 def test_case_f_group_filter_is_reflected_in_the_card_without_changing_n(inputs, tmp_path):
@@ -201,8 +202,8 @@ def test_case_f_group_filter_is_reflected_in_the_card_without_changing_n(inputs,
     app.selectbox(key='ds_group').set_value('female').run()
     assert not app.exception
     captions = captions_of(app)
-    assert '孩子分組：女' in captions
-    assert [(m.label, m.value) for m in card_of(app).metric] == [(N_LABEL_OVERVIEW, '1 / 1')]
+    assert english('孩子分組：女') in captions
+    assert [(m.label, m.value) for m in card_of(app).metric] == [(english(N_LABEL_OVERVIEW), '1 / 1')]
 
 
 def test_case_d_trend_reading_labels_the_card_count_as_before_date_filter(inputs, tmp_path):
@@ -212,6 +213,6 @@ def test_case_d_trend_reading_labels_the_card_count_as_before_date_filter(inputs
     app.radio(key='ds_reading').set_value('時段趨勢').run()
     assert not app.exception
     metric = card_of(app).metric[0]
-    assert metric.label == N_LABEL_TREND
+    assert metric.label == english(N_LABEL_TREND)
     assert metric.value == '2 / 2'
-    assert TREND_REMINDER in captions_of(app)
+    assert english(TREND_REMINDER) in captions_of(app)

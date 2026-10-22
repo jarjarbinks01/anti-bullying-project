@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+from study2.english_ui import st
 
 from study2.common import load_config, digest, file_hash
 from study2.parent_waves import POLICY as NEAREST_PARENT_POLICY
