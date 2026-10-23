@@ -1,6 +1,7 @@
 """Synthetic checks for the code-only Git boundary; no research files read."""
 import hashlib
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -54,3 +55,36 @@ def test_allowlist_does_not_allow_path_traversal_or_unrelated_files():
     assert not guard.allowed_path('/study2/a.py')
     assert not guard.allowed_path('other/study2/a.py')
     assert guard.allowed_path('study2/review_core.py')
+
+
+@pytest.mark.parametrize('path', [
+    'tests/static_source_ui_browser.cjs',
+    'tests/paired_table_ui_browser.cjs',
+])
+def test_reviewed_browser_harnesses_keep_content_and_mode_guards(path):
+    assert guard.inspect_blob(path, b'console.log("synthetic fixture");') == []
+    assert guard.inspect_blob(path, ('SUB_' + 'a' * 26).encode())
+    assert guard.inspect_blob(path, ('person' + '@' + 'private-school.hk').encode())
+    assert guard.inspect_blob(path, ('/Users/' + 'private-user/data/file').encode())
+    assert guard.inspect_blob(path, b'SQLite format 3\x00data')
+    assert guard.inspect_blob(path, b'../private', '120000')
+
+
+def test_browser_allowlist_remains_exact_and_gitignore_agrees(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / '.gitignore').write_bytes((root / '.gitignore').read_bytes())
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    cases = {
+        'tests/static_source_ui_browser.cjs': False,
+        'tests/paired_table_ui_browser.cjs': False,
+        'tests/private_case.cjs': True,
+        'study2/static_source_ui_browser.cjs': True,
+        'tests/results.csv': True,
+        'tests/source_snapshot.json': True,
+    }
+    for path, ignored in cases.items():
+        result = subprocess.run(['git', 'check-ignore', '--quiet', '--no-index', path],
+                                cwd=tmp_path, check=False)
+        assert result.returncode == int(not ignored)
+        if ignored:
+            assert not guard.allowed_path(path)

@@ -20,6 +20,8 @@
 !/tests/
 /tests/*
 !/tests/*.py
+!/tests/static_source_ui_browser.cjs
+!/tests/paired_table_ui_browser.cjs
 
 !/mappings/
 /mappings/*

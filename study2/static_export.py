@@ -32,6 +32,8 @@ from .static_scope import (ADULT_POLICY, ScopeError, build_scope_index,
 from .static_english_catalog import (CATALOGUE_VERSION, bd_sample_text,
                                      stage_2_1_5_text, text as english)
 from .static_grade import attach_grade, build_cube, header as grade_header, validate_grade
+from .static_sources import (CODES as SOURCE_CODES, build_pairs as source_pairs,
+                             header as source_header, source_code, validate_sources)
 
 FORMAT = 'study2_static_v1'
 DEPLOY_FILES = {'index.html', 'app.js', 'styles.css', 'snapshot.js', 'vercel.json',
@@ -218,6 +220,7 @@ def english_snapshot(snapshot, summary):
     for view in snapshot['views']:
         for rows in [view.get('statistics', []), view.get('changes', []), view.get('transitions', []),
                      view.get('grade', {}).get('statistics_schema', []), view.get('grade', {}).get('pairs_schema', []),
+                     *(group['pairs_schema'] for group in view.get('source_pairs', {}).get('groups', [])),
                      *(period['statistics'] for period in view.get('trends', []))]:
             for row in rows:
                 if 'variable' in row:
@@ -503,16 +506,22 @@ def build_views(frame, parents, measurements, summary, folder, minimum, progress
                                     ('independent_child', 'child_report', True),
                                     ('independent_adult', 'same_adult', True)]:
             scopes.append((key, 'parent', independent_cohort(panel['analysis'], measurements, branch, paired)))
+    source_capable = set(SOURCE_NAMES) == set(SOURCE_CODES)
+    residual = minimum == 0 and any(not rows['anchor_source_type'].isin(SOURCE_CODES).all()
+                                  for _, _, rows in scopes)
     for mode, role, base in scopes:
         if minimum == 0:
             base, grade_anchor = attach_grade(base, frame, measurements, mode, role)
+            # Presentation-only partition key; unknown values must not vanish
+            # when known source codes are pooled. Original sources stay intact.
+            base['anchor_source_type'] = base['anchor_source_type'].map(source_code)
         reference = next((rows for key, who, rows in scopes
                           if key == {'abcd': 'acbd', 'ef': 'efmatched',
                                      'independent_all': 'independent_child'}.get(mode) and who == role), None)
         for mainstream in (False, True):
             if progress:
                 progress(f'{mode} / {role} / {"mainstream" if mainstream else "all schools"}')
-            for source in ('all', *SOURCE_NAMES):
+            for source in ('all', *SOURCE_NAMES, *(('unknown',) if residual else ())):
                 selected, _ = filter_cohort(base, mainstream=mainstream, sources=() if source == 'all' else (source,))
                 selected.attrs['mode'] = base.attrs['mode']
                 stats = statistics(selected, role, tuple(GROUPS))
@@ -531,6 +540,9 @@ def build_views(frame, parents, measurements, summary, folder, minimum, progress
                             statistics=safe_statistics(stats, minimum), changes=safe_changes(changes, minimum))
                 if minimum == 0:
                     view['grade'] = build_cube(selected, role, view, tuple(GROUPS), grade_anchor)
+                    if source_capable and source == 'all' and reference is not None:
+                        view['source_pairs'] = source_pairs(selected, reference, role, tuple(GROUPS),
+                            (*SOURCE_CODES, 'unknown') if residual else SOURCE_CODES)
                 if source == 'all':
                     paired = mode in {'acbd', 'efmatched', 'independent_child', 'independent_adult'}
                     view['histograms'] = _exploration(selected, role, summary['release_id'], False, minimum)
@@ -611,13 +623,15 @@ def build_snapshot(folder, summary, imported, minimum=0, progress=None):
                     independent_counts=parent_counts, groups=GROUPS,
                     modes={**MODES, 'independent_all': '全部獨立家長基線及追蹤',
                            'independent_child': '獨立家長：同一孩子跨期', 'independent_adult': '獨立家長：同一成人跨期'},
-                    source_names={'all': '全部來源', **SOURCE_NAMES}, notes=NOTES,
+                    source_names={'all': '全部來源', **SOURCE_NAMES, **({'unknown': 'Unidentified source'} if minimum == 0 else {})}, notes=NOTES,
                     dictionary=[{k: r[k] for k in ('variable_id', 'label', 'kind', 'role', 'section', 'unit', 'note')}
                                 for r in dictionary_rows()],
                     parent_wave_policy=summary.get('parent_wave_policy', ''),
                     views=build_views(frame, parents, measurements, summary, folder, minimum, progress))
     if minimum == 0:
         snapshot['grade'] = grade_header(summary['release_id'])
+        if set(SOURCE_NAMES) == set(SOURCE_CODES):
+            snapshot['source_selection'] = source_header(summary['release_id'], snapshot['views'])
     english_snapshot(snapshot, summary)
     validate_snapshot(snapshot)
     return snapshot
@@ -642,6 +656,7 @@ def validate_snapshot(snapshot):
             raise PipelineError('靜態快照含有識別碼、個人聯絡或本機路徑。')
     visit(snapshot)
     validate_grade(snapshot)
+    validate_sources(snapshot)
     json.dumps(plain(snapshot), allow_nan=False)
 
 
