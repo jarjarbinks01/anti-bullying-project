@@ -242,12 +242,33 @@ function validate(S,v){
  }
  return c;
 }
-function pool(S,v,chosen){const selected=selection(chosen),c=validate(S,v),out={...v,statistics:[],changes:[],counts:{},grade_custom:true,grade_anchor:c.anchor};
+function withWaveSD(S,v){
+ if(!['acbd','efmatched','independent_child','independent_adult'].includes(v.mode))return v;
+ const out={...v,changes:v.changes.map(r=>({...r,t0_sd:null,t1_sd:null}))};
+ try{
+  const c=validate(S,v),expectedAnchor=v.mode.startsWith('independent_')?'parent_report_T0':'student_T0';
+  if(c.anchor!==expectedAnchor)return out;
+  const near=(a,b)=>a===null?b===null:Number.isFinite(b)&&Math.abs(a-b)<=64*Number.EPSILON*Math.max(1,Math.abs(a),Math.abs(b));
+  out.changes=out.changes.map(r=>{
+   if(r.suppressed||r.pair_detail_status!=='available')return r;
+   const i=c.pairs_schema.findIndex(m=>m.variable_id===r.variable_id);
+   if(i<0||Object.keys(c.pairs_schema[i]).some(k=>c.pairs_schema[i][k]!==r[k]))return r;
+   const rows=c.cells.filter(x=>x.group===r.group&&x.pairs!==null).map(x=>unpack(x.pairs[i],pair));
+   if(pair.slice(0,6).some(k=>rows.reduce((n,x)=>n+x[k],0)!==r[k]))return r;
+   const a=moment(rows,'paired_valid_n','t0_mean','t0_M2'),b=moment(rows,'paired_valid_n','t1_mean','t1_M2'),d=moment(rows,'paired_valid_n','mean_change','delta_M2');
+   if(a.n!==r.paired_valid_n||b.n!==a.n||d.n!==a.n||!near(a.mean,r.t0_mean)||!near(b.mean,r.t1_mean)||!near(d.mean,r.mean_change))return r;
+   if(a.n<2||!Number.isFinite(a.sd)||!Number.isFinite(b.sd))return r;
+   return {...r,t0_sd:a.sd,t1_sd:b.sd};
+  });
+ }catch(error){/* Optional moments must never hide the original stored summary. */}
+ return out;
+}
+function pool(S,v,chosen,options={}){const selected=selection(chosen),c=validate(S,v),sdAnchor=c.anchor===(v.mode.startsWith('independent_')?'parent_report_T0':'student_T0'),out={...v,statistics:[],changes:[],counts:{},grade_custom:true,grade_anchor:c.anchor};
  delete out.histograms;delete out.paired_histograms;delete out.transitions;delete out.trends;
  for(const g of Object.keys(v.counts)){const cells=c.cells.filter(x=>x.group===g&&selected.includes(x.grade_code));out.counts[g]=Object.fromEntries(['T0','T1'].map(w=>[w,cells.reduce((n,x)=>n+x.counts[w],0)]));
   c.statistics_schema.forEach((m,i)=>{const rows=cells.filter(x=>x.statistics!==null).map(x=>unpack(x.statistics[i],stat));const sum=k=>rows.reduce((n,r)=>n+r[k],0);const mm=moment(rows,'valid_n','mean','M2');const denominator=sum('denominator'),numerator=m.kind==='continuous'?null:sum('numerator');out.statistics.push({...m,group:g,sample_n:sum('sample_n'),valid_n:sum('valid_n'),missing_n:sum('missing_n'),outside_range_n:sum('outside_range_n'),mean:m.kind==='continuous'?mm.mean:null,sd:m.kind==='continuous'?mm.sd:null,numerator,denominator,proportion:numerator!==null&&denominator?numerator/denominator:null,suppressed:false});});
-  c.pairs_schema.forEach((m,i)=>{const rows=cells.filter(x=>x.pairs!==null).map(x=>unpack(x.pairs[i],pair));const sums=Object.fromEntries(pair.slice(0,6).map(k=>[k,rows.reduce((n,r)=>n+r[k],0)]));const a=moment(rows,'paired_valid_n','t0_mean','t0_M2'),b=moment(rows,'paired_valid_n','t1_mean','t1_M2'),d=moment(rows,'paired_valid_n','mean_change','delta_M2');out.changes.push({...m,...sums,group:g,t0_mean:a.mean,t1_mean:b.mean,mean_change:d.mean,sd_change:d.sd,p_value:null,cohen_dz:null,inference_status:'custom_grade_inference_unavailable',pair_detail_status:'available',suppressed:false});});
+  c.pairs_schema.forEach((m,i)=>{const rows=cells.filter(x=>x.pairs!==null).map(x=>unpack(x.pairs[i],pair));const sums=Object.fromEntries(pair.slice(0,6).map(k=>[k,rows.reduce((n,r)=>n+r[k],0)]));const a=moment(rows,'paired_valid_n','t0_mean','t0_M2'),b=moment(rows,'paired_valid_n','t1_mean','t1_M2'),d=moment(rows,'paired_valid_n','mean_change','delta_M2');out.changes.push({...m,...sums,group:g,t0_mean:a.mean,t1_mean:b.mean,mean_change:d.mean,sd_change:d.sd,p_value:null,cohen_dz:null,inference_status:'custom_grade_inference_unavailable',pair_detail_status:'available',suppressed:false,...(options.wave_sd===true?{t0_sd:sdAnchor&&Number.isFinite(a.sd)&&Number.isFinite(b.sd)?a.sd:null,t1_sd:sdAnchor&&Number.isFinite(a.sd)&&Number.isFinite(b.sd)?b.sd:null}:{})});});
  }return out;
 }
-return Object.freeze({codes,selection,all,pool,validate,moment});})();
+return Object.freeze({codes,selection,all,pool,validate,moment,withWaveSD});})();
 '''

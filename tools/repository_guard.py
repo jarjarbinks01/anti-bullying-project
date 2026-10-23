@@ -28,6 +28,8 @@ EXACT_PATHS = {
     'docs/INDEPENDENT_PARENT_ANALYSIS.md',
     'docs/DESCRIPTIVE_ANALYSIS.md',
     'docs/STATIC_RESEARCHER_DASHBOARD.md',
+    'tests/static_source_ui_browser.cjs',
+    'tests/paired_table_ui_browser.cjs',
 }
 PYTHON_DIRECTORIES = {'study2', 'tests', 'mappings'}
 TEMPLATE_PATH = 'study2/assets/review_template.xlsx'
