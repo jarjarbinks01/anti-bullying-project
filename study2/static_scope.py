@@ -372,7 +372,8 @@ def build_scope_index(records, analysis, parent_longitudinal, summary, *, flow_e
 def validate_index(index):
     """Strict public-payload allowlist. Also used before every query."""
     _need(isinstance(index, dict) and index.get("format") == FORMAT, "compatible_scope_export_required")
-    _need(set(index) == {"format", "meta", "sources", "surveys", "profiles", "records", "samples", "schools"},
+    _need(set(index) == {"format", "meta", "sources", "surveys", "profiles", "records", "samples", "schools"}
+          | ({"eligibility"} if "eligibility" in index else set()),
           "unexpected_index_field")
     _need(all(isinstance(index[k], list) for k in ("sources", "surveys", "profiles", "records", "samples", "schools")),
           "invalid_index_array")
@@ -495,6 +496,11 @@ def validate_index(index):
         if len(r["profiles"]) == 1:
             singles[r["profiles"][0]] += r["count"]
         _need(r["count"] <= raw_total, "sample_exceeds_raw")
+    if 'eligibility' in index:
+        from .analysis_eligibility import validate_scope_eligibility
+        excluded = validate_scope_eligibility(index)
+        selected.subtract(excluded)
+        selected = +selected
     _need(singles == selected, "selected_sample_reconciliation")
     # Whole-index slot margins also detect corrupted aggregate multiplicities.
     # BD's second slot may be an unselected retained record, so its first slot
@@ -639,5 +645,9 @@ def _assemble(index, scope, mask):
                identity_groups=dict(status="unavailable", count=None, unit="identity_groups", reason="represented_group_signatures_not_provided"),
                school=school, reconciliation=deepcopy(index["meta"]["reconciliation"]),
                scope_notice="First-tab scope only; published matching and other tabs are unchanged.")
+    if 'eligibility' in index:
+        from .analysis_eligibility import query_scope_eligibility
+        out['eligibility'] = query_scope_eligibility(index, mask)
+        out['scope_notice'] = 'Fixed published members after manual analytical exclusions; raw and stages remain historical.'
     canonical_json(out)
     return deepcopy(out)

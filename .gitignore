@@ -22,6 +22,7 @@
 !/tests/*.py
 !/tests/static_source_ui_browser.cjs
 !/tests/paired_table_ui_browser.cjs
+!/tests/manual_exclusion_ui_browser.cjs
 
 !/mappings/
 /mappings/*

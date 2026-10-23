@@ -27,8 +27,7 @@ def header(release, views):
     return dict(format=FORMAT, release_id=release, report_version=VERSION,
                 dictionary_version=DICTIONARY_VERSION, profile='protected_researcher',
                 minimum_cell_n=0, source_codes=list(CODES),
-                residual_present=any(v['source'] == 'unknown' and
-                    any(n for counts in v['counts'].values() for n in counts.values()) for v in views))
+                residual_present=any(v['source'] == 'unknown' for v in views))
 
 
 def pair_vector(a, b):

@@ -111,14 +111,15 @@ def render_trends(rows, role, release_id, *, prefix, metadata=None):
     display['category'] = display['category'].map(lambda v: labels.get(v, v))
     st.dataframe(display.rename(columns={'covered_start': '開始', 'covered_end': '結束', 'wave': '輪次',
         'category': '類別', 'count': '回應N', 'denominator': '分母', 'proportion': '比例'}), hide_index=True, width='stretch')
+    from .streamlit_eligibility import stamp_frame,download_name
     with st.expander('下載目前分析及核對明細'):
         st.caption('每個指標各自扣除缺失；全期間統計直接使用相關回應，不平均各月平均。SD為樣本標準差，N=1不估算。')
         for name, title in TABLE_NAMES.items():
             data = result[name]
             st.markdown('**'+title+'**')
             st.dataframe(data.drop(columns=['release_id', 'basis', 'trend_version'], errors='ignore'), hide_index=True, width='stretch')
-            st.download_button('下載'+title+' CSV', download_table(result, name).to_csv(index=False).encode('utf-8-sig'),
-                f'study2-{prefix}-calendar_response-{name}.csv', 'text/csv', key=prefix+'_csv_'+name)
+            st.download_button('下載'+title+' CSV', stamp_frame(download_table(result, name),result['metadata']).to_csv(index=False).encode('utf-8-sig'),
+                download_name(f'study2-{prefix}-calendar_response-{name}.csv',result['metadata']), 'text/csv', key=prefix+'_csv_'+name)
         st.json(result['metadata'])
         st.download_button('下載時段趨勢 Excel', workbook_bytes(result),
             f'study2-{prefix}-calendar_response.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=prefix+'_xlsx')

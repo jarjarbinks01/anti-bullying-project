@@ -37,7 +37,7 @@ from .static_sources import (CODES as SOURCE_CODES, build_pairs as source_pairs,
 
 FORMAT = 'study2_static_v1'
 DEPLOY_FILES = {'index.html', 'app.js', 'styles.css', 'snapshot.js', 'vercel.json',
-                'scope-index.js', 'scope-engine.js', 'quality-ui.js',
+                'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js',
                 '.vercelignore', 'snapshot-manifest.json', *ACCESS_FILES}
 SCOPE_EXPORT_FORMAT = 'study2_static_scope_export_v1'
 STAT_FIELDS = ['wave', 'group', 'variable_id', 'variable', 'section', 'kind', 'unit',
@@ -492,13 +492,15 @@ def _binary_pairs(rows, role, release_id, minimum):
     return [r for block in partitions.values() for r in block]
 
 
-def build_views(frame, parents, measurements, summary, folder, minimum, progress=None):
+def build_views(frame, parents, measurements, summary, folder, minimum, progress=None, *, prepared_scopes=None,
+                retain_residual=False):
+    folder = Path(folder)
     views = []
     scopes = [(mode, role, cohort(frame, parents, measurements, mode, role))
               for mode in MODES for role in ('student', 'parent')
-              if not (parents is None and mode == 'acbd' and role == 'parent')]
+              if not (parents is None and mode == 'acbd' and role == 'parent')] if prepared_scopes is None else prepared_scopes
     parent_file = folder / 'independent_parent_analysis.parquet'
-    if summary.get('independent_parent') and parent_file.exists():
+    if prepared_scopes is None and summary.get('independent_parent') and parent_file.exists():
         from .parent_panel_views import read_panel, verify_panel
         panel = read_panel(folder)
         verify_panel(panel, summary['independent_parent'])
@@ -507,8 +509,8 @@ def build_views(frame, parents, measurements, summary, folder, minimum, progress
                                     ('independent_adult', 'same_adult', True)]:
             scopes.append((key, 'parent', independent_cohort(panel['analysis'], measurements, branch, paired)))
     source_capable = set(SOURCE_NAMES) == set(SOURCE_CODES)
-    residual = minimum == 0 and any(not rows['anchor_source_type'].isin(SOURCE_CODES).all()
-                                  for _, _, rows in scopes)
+    residual = minimum == 0 and (retain_residual or any(not rows['anchor_source_type'].isin(SOURCE_CODES).all()
+                                                     for _, _, rows in scopes))
     for mode, role, base in scopes:
         if minimum == 0:
             base, grade_anchor = attach_grade(base, frame, measurements, mode, role)
@@ -712,7 +714,8 @@ def _owned_deployment(destination):
     return True
 
 
-def write_site(snapshot, destination, *, scope_export=None, verify_inputs=None, input_inventory=None):
+def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=None,
+               verify_inputs=None, input_inventory=None):
     from .static_assets import APP_JS, HTML, STYLES
     from .static_scope_client import JS_SOURCE as SCOPE_JS
     from .static_quality_ui import JS_SOURCE as QUALITY_JS
@@ -720,6 +723,9 @@ def write_site(snapshot, destination, *, scope_export=None, verify_inputs=None, 
     if scope_export is None:
         scope_export = unavailable_scope('compatible_scope_export_required', snapshot['release_id'])
     validate_scope_export(scope_export, snapshot)
+    from .manual_exclusion_export import JS_HASH, validate_manual_export
+    if manual_exclusion is not None:
+        validate_manual_export(manual_exclusion, snapshot, scope_export)
     destination = Path(destination).absolute()
     if destination.is_symlink():
         raise PipelineError('匯出位置不可是捷徑。')
@@ -737,10 +743,15 @@ def write_site(snapshot, destination, *, scope_export=None, verify_inputs=None, 
     failed = stage.with_name(stage.name + '-discarded')
     initially_present = destination.exists()
     try:
-        contents = {**ACCESS_FILES, 'index.html': HTML, 'app.js': APP_JS, 'styles.css': STYLES,
+        html = HTML if 'src="manual-exclusion.js"' in HTML else HTML.replace(
+            '<script defer src="app.js">', '<script defer src="manual-exclusion.js"></script><script defer src="app.js">')
+        contents = {**ACCESS_FILES, 'index.html': html, 'app.js': APP_JS, 'styles.css': STYLES,
                     'snapshot.js': 'window.STUDY2_SNAPSHOT=' + json.dumps(plain(pack_snapshot(snapshot)), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-index.js': 'window.STUDY2_SCOPE_EXPORT=' + json.dumps(plain(scope_export), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-engine.js': SCOPE_JS, 'quality-ui.js': QUALITY_JS,
+                    'manual-exclusion.js': JS_HASH + '\nwindow.STUDY2_MANUAL_EXCLUSION=' + json.dumps(
+                        plain(manual_exclusion), ensure_ascii=False, separators=(',', ':'),
+                        allow_nan=False).replace('<', '\\u003c') + ';\n',
                     '.vercelignore': '*\n' + ''.join('!' + name + '\n' for name in sorted(
                         (DEPLOY_FILES - {'preview.mjs', 'DEPLOYMENT.md', '.vercelignore'}) | {'api', 'server'})),
                     'vercel.json': json.dumps({'framework': None, 'buildCommand': 'npm run build',
@@ -761,6 +772,9 @@ def write_site(snapshot, destination, *, scope_export=None, verify_inputs=None, 
                         snapshot_sha256=digest(snapshot), files={name: file_hash(stage / name) for name in contents})
         manifest.update(scope_format=SCOPE_EXPORT_FORMAT, index_revision=scope_export['index_revision'],
                         input_inventory=input_inventory or {}, input_revision=digest(input_inventory or {}))
+        if manual_exclusion is not None:
+            manifest['manual_exclusion'] = {k: manual_exclusion[k] for k in
+                ('format', 'hash_scheme', 'status', 'revision', 'inventory_revision', 'on_revision')}
         (stage / 'snapshot-manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         if verify_inputs:
             verify_inputs()
@@ -823,7 +837,7 @@ def _input_inventory(folder, state, release_root):
             'release_location_mapping': _file_pin(state / 'release_locations.json')}
 
 
-def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None):
+def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None, manual_manifest=None):
     state = Path(cfg['state_dir']).resolve()
     raw_destination = Path(destination).absolute()
     if raw_destination.is_symlink():
@@ -865,20 +879,37 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
         pins['published_summary'] = dict(sha256=digest(summary))
         pins['legacy_source_counts'] = dict(sha256=digest(source_counts))
         pins['supplied_school_binding'] = dict(sha256=digest(school_binding)) if school_binding is not None else None
-        initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding'}}
+        pins['supplied_manual_manifest'] = dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None
+        initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest'}}
         def verify():
             now = current(db)
             counts_now = sorted(imported_source_counts(db, release['run_id']), key=lambda row: json.dumps(row, sort_keys=True))
             if (now != release or _input_inventory(folder, state, release_root) != initial_files or
                     digest(counts_now) != pins['legacy_source_counts']['sha256'] or
-                    (dict(sha256=digest(school_binding)) if school_binding is not None else None) != pins['supplied_school_binding']):
+                    (dict(sha256=digest(school_binding)) if school_binding is not None else None) != pins['supplied_school_binding'] or
+                    (dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None) != pins['supplied_manual_manifest']):
                 raise PipelineError('Published inputs or pointer changed during export; previous export retained.')
         scope = build_scope_export(folder, summary, minimum, school_binding=school_binding)
         snapshot = build_snapshot(folder, summary, imported, minimum, progress)
         snapshot['published_at'] = release['created_at']
+        manual_export = None
+        if manual_manifest is not None:
+            from .manual_exclusion_export import build_manual_export
+            with gzip.open(folder / 'records.jsonl.gz', 'rt', encoding='utf-8') as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
+            analysis = pd.read_parquet(folder / 'analysis.parquet')
+            parent_path = folder / 'parent_longitudinal.parquet'
+            parents = pd.read_parquet(parent_path) if parent_path.exists() else None
+            measurements = pd.read_parquet(folder / 'descriptive_measurements.parquet')
+            panel = None
+            if summary.get('independent_parent'):
+                from .parent_panel_views import read_panel
+                panel = read_panel(folder)
+            manual_export = build_manual_export(snapshot, scope, records, analysis, parents,
+                measurements, summary, imported, manual_manifest, panel=panel, progress=progress)
         verify()
         return write_site(snapshot, destination, scope_export=scope,
-                          verify_inputs=verify, input_inventory=pins)
+                          manual_exclusion=manual_export, verify_inputs=verify, input_inventory=pins)
     finally:
         db.close()
 

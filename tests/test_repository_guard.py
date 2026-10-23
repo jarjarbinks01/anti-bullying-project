@@ -60,6 +60,7 @@ def test_allowlist_does_not_allow_path_traversal_or_unrelated_files():
 @pytest.mark.parametrize('path', [
     'tests/static_source_ui_browser.cjs',
     'tests/paired_table_ui_browser.cjs',
+    'tests/manual_exclusion_ui_browser.cjs',
 ])
 def test_reviewed_browser_harnesses_keep_content_and_mode_guards(path):
     assert guard.inspect_blob(path, b'console.log("synthetic fixture");') == []
@@ -77,6 +78,7 @@ def test_browser_allowlist_remains_exact_and_gitignore_agrees(tmp_path):
     cases = {
         'tests/static_source_ui_browser.cjs': False,
         'tests/paired_table_ui_browser.cjs': False,
+        'tests/manual_exclusion_ui_browser.cjs': False,
         'tests/private_case.cjs': True,
         'study2/static_source_ui_browser.cjs': True,
         'tests/results.csv': True,
