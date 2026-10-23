@@ -150,3 +150,200 @@ grade cube on a pooled result. The pooled result intentionally carries only
 selected aggregates. No authentication, research-policy or deployment changes
 belong to this module. Use synthetic tests before regenerating a separately
 authorized research export.
+
+## Reversible manual flag exclusion
+
+The optional exclusion setting is an analytical view of fixed published
+membership. OFF is the default. ON removes accepted exact submission/version
+keys without selecting another baseline, follow-up, adult or identity group.
+An unflagged individual response remains in its original single-wave sample.
+AC and BD require their own original two responses, E and F their own dyad,
+and EF all four original responses. BD and independent-parent branches can
+use different follow-ups and must retain their own membership.
+
+Keep three counts separate: flagged review-file rows, distinct mapped
+submission IDs, and removed analytical responses or composite units. Raw
+intake and historical processing remain visible as reference facts. Active
+excluded/retained intake and all nine sample deltas are separate aggregates.
+Administrative tracking and identity decisions are not changed by this view.
+
+Mapping is a private operator step. Accept only a reviewed manifest bound to
+the exact release, complete inventory, content versions and explicit copy
+policy. Missing, stale, ambiguous, conflicting or unaccepted evidence makes
+ON unavailable; OFF remains usable. Questionnaire email may be stored under
+`contact_03.1`; never infer missing email data from a missing literal `Email`
+column or silently substitute a different review-file field. Do not propagate
+flags through a shared contact, child ID, source profile or school.
+
+The Python entry point is programmatic:
+
+```python
+from study2.static_export import export_static
+
+result = export_static(
+    cfg,
+    destination,
+    minimum=0,
+    manual_manifest=accepted_manifest,
+)
+```
+
+`cfg`, `destination` and the accepted private manifest are supplied by the
+local operator. The static-export CLI has no new manifest flag. The weekly
+flag tool below runs only when explicitly invoked by the operator.
+
+For the local Streamlit dashboard, supply the accepted manifest's private path
+through `STUDY2_MANUAL_EXCLUSION_MANIFEST`. Its session selector uses the same
+core projection and prepares original cohorts before applying exclusions.
+Existing filters retain their canonical options and grouping anchors. Invalid
+requested ON blocks analysis while leaving OFF selectable. Without an explicit
+manifest path the OFF adapter reads no manifest or raw-record inputs. Active
+CSV, Excel and JSON downloads include eligibility and release metadata; fixed
+original 4.1 workbooks are unavailable under ON.
+
+Legacy parquet without a version column requires full agreement with the
+same release's canonical data and provenance before its exact inventory versions
+are attached in memory. Existing conflicting versions are rejected; published
+files and source records are not rewritten.
+
+The published sample catalogue also supports the supplementary same-child
+parent cross-wave count. It is updated from its original B/D members and stays
+separate from the nine primary sample deltas. Declared source and grade options
+remain available when their active count becomes zero.
+
+The exporter keeps the original OFF snapshot once and writes the optional
+complete ON aggregates into authenticated `manual-exclusion.js`. The wrapper
+binds both snapshots and scope indexes to the release and an opaque mapping
+revision. It contains no private IDs, mapping entries, contacts, reasons or
+source paths. Typed float and UTF16 revision hashing preserves Python/browser
+agreement without rounding scientific values.
+
+ON validation requires the complete original view catalogue and closed table
+schemas, with immutable metric labels checked against trusted OFF. Recomputing
+a content hash does not authorize extra fields or replacement labels. Original
+questionnaire labels and the existing suppression policy remain unchanged.
+
+Choose a complete validated bundle before applying existing filters and
+Source/Grade calculations. Recompute statistics, complete-pair means/SD,
+inference, distributions and periods from surviving native members. Preserve
+the existing same-adult PHQ restrictions and unsupported source/grade cases.
+Downloads identify the active exclusion mode and revision. Switching OFF
+restores the original results without mutating the published data.
+
+Deploy the complete protected export folder only after separate authorization.
+The new aggregate asset follows the same middleware and no-store policy as
+the other data assets. Local candidate validation is not publication or
+deployment, and the exclusion setting does not modify live research state.
+
+## Weekly manual flag ledger
+
+Keep one private ledger outside the code checkout and research databases.
+`python -m study2.manual_flags` previews and imports a review CSV, then exports
+an accepted manifest for an explicitly named published release. A later CSV
+adds evidence to the same ledger. Omitting an earlier row never clears its
+flag. The tool does not run on a schedule.
+
+The CSV projection is limited to `Email`, `Survey`, `建立時間`, `contact_01`,
+`contact_02`, `student_demographics_06`, `contact_03.1`,
+`adult_demographics_03` and `Review`. Each required header must occur once.
+`Review` must contain the case-sensitive literal substring
+`suspected fake case`; surrounding text is allowed. The seven match fields
+exclude `Email` and `Review`. They use NFKC, trimming and integral
+representation for native numeric values. Numeric-looking strings retain
+leading zeros, `.0` and exponent spelling. Present blanks compare as blanks.
+Email case, dates and telephone punctuation are not rewritten.
+Multiple matching IDs require the explicit identical-copy policy, equal
+roles and verified full raw-content hashes.
+
+Strict mode requires all seven keys. Published merged questionnaires retain
+different columns by role, so pass `--merged-role-structural-blanks` explicitly
+on both preview and import. It permits only absent `contact_03.1` and
+`adult_demographics_03` on student records, or absent
+`student_demographics_06` on parent records, to contribute empty comparison
+slots. Present values and full raw hashes remain unchanged. Missing common
+or own-role keys remain unindexable; nonblank CSV values cannot match these
+structural blanks. The projection choice is part of the batch fingerprint.
+
+Run these commands with the project Python and integrated code checkout.
+Replace every angle-bracket value with an operator-supplied local value.
+Reports and manifests contain private IDs and must stay outside Git and the
+online export.
+
+Create the dedicated ledger once. Its parent must already exist; `init`
+refuses an existing file, including an unrelated or empty SQLite file.
+
+```bash
+PYTHONPATH="<CODE_CHECKOUT>" "<PROJECT_PYTHON>" -m study2.manual_flags init \
+  --registry "<PRIVATE_LEDGER>" --operator "<OPERATOR>"
+```
+
+An existing approved flag set can be preserved with `seed --registry ...
+--manifest ... --release-folder ... --operator ... --reason ...`. Seed
+validates the exact inventory and complete identical-copy sets. It cannot
+silently restore a removed flag or approve a changed content version.
+
+For each weekly batch, first preview the exact CSV against the exact
+published release folder. That folder's `summary.json` and
+`records.jsonl.gz` are the inputs; the tool does not consult CURRENT or a
+research database. An explicit versioned inventory JSON is also supported
+through `--inventory` instead of `--release-folder`.
+
+```bash
+PYTHONPATH="<CODE_CHECKOUT>" "<PROJECT_PYTHON>" -m study2.manual_flags preview \
+  --csv "<WEEKLY_CSV>" --release-folder "<EXACT_RELEASE_FOLDER>" \
+  --copy-policy all_byte_identical_copies --merged-role-structural-blanks \
+  --report "<NEW_PRIVATE_PREVIEW>"
+
+PYTHONPATH="<CODE_CHECKOUT>" "<PROJECT_PYTHON>" -m study2.manual_flags import \
+  --registry "<PRIVATE_LEDGER>" --csv "<WEEKLY_CSV>" \
+  --release-folder "<EXACT_RELEASE_FOLDER>" \
+  --copy-policy all_byte_identical_copies --merged-role-structural-blanks \
+  --expected-csv-sha256 "<CSV_SHA256_FROM_PREVIEW>" --operator "<OPERATOR>" \
+  --report "<NEW_PRIVATE_IMPORT_REPORT>"
+
+PYTHONPATH="<CODE_CHECKOUT>" "<PROJECT_PYTHON>" -m study2.manual_flags export \
+  --registry "<PRIVATE_LEDGER>" --release-folder "<EXACT_RELEASE_FOLDER>" \
+  --operator "<OPERATOR>" --output "<NEW_VERSIONED_PRIVATE_MANIFEST>" \
+  --report "<NEW_PRIVATE_SNAPSHOT_REPORT>"
+```
+
+Inspect the preview and import reports. Valid mappings may enter the ledger
+alongside unresolved observations, but unresolved or ambiguous evidence,
+changed versions, missing active IDs and incomplete copy sets block accepted
+manifest export. For `export`, exit 0 means accepted, 2 means blocked with no manifest
+written, and 1 means an input or operation error. An earlier different output
+file is never overwritten. A successful manifest supplies the same static
+export API or Streamlit environment setting documented above.
+
+Reimporting the same CSV/release/inventory/rule/policy creates no flags or
+history. Repeating the same-state export preserves its approval, timestamp,
+revision and bytes. Retain the ledger, immutable manifests and private reports
+as the provenance for each analytical export.
+
+If a new publication has no new review CSV, export the existing ledger against
+that exact release. Unchanged permanent IDs and content versions carry
+forward; changed or missing pins require explicit resolution before export.
+
+Corrections require the registry path, operator and a nonblank reason:
+
+| Command | Effect |
+|---|---|
+| `remove --submission-id ID` | Remove a flag with a persistent tombstone and history. A later CSV cannot reactivate it. |
+| `restore --submission-id ID --release-folder ...` | Explicitly restore the exact current ID/version/content/role. |
+| `rebind --submission-id ID --release-folder ...` | Approve a changed pin for an active flag; it cannot restore a removed flag. |
+| `dismiss --observation-id ID` | Resolve pending CSV evidence without guessing an ID or removing a flag. |
+| `ack-absent --submission-id ID --release-folder ...` | Explicitly omit an absent active flag for this release/inventory/content pin while retaining its global flag and history. |
+
+Repeat the ID option for multiple IDs. Removing only one member of an
+identical-copy set can still block export. A corrected CSV does not erase an
+earlier unresolved observation. Use `status --registry ... --history --report
+<NEW_PRIVATE_REPORT>` to retain current flags, pending evidence and events.
+Completed held-observation resolutions retain their explicit decision
+reference and remain closed after later version approvals. New observations
+still require their own resolution; original candidates and history stay saved.
+
+An optional report write can fail after an import has committed. Retrying the
+identical import is an idempotent no-op. The ledger rejects pending SQLite
+journal/WAL/SHM sidecars with `registry_recovery_required`; preserve those
+files for explicit local recovery. This ledger is separate from research
+decisions and does not change identity, wave selection or published samples.

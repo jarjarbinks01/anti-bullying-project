@@ -110,17 +110,21 @@ def _legacy(folder,summary,frame,parents):
     st.dataframe(descriptive_summary(rows),hide_index=True,width='stretch')
 
 
-def render_descriptive(folder,summary,frame,parents,rule_names):
+def render_descriptive(folder,summary,frame,parents,rule_names,*,eligibility=None):
     from .english_ui import st
     from .descriptive_workbench import render_overview,render_workbench
+    from .streamlit_eligibility import ActiveEligibilityUnavailable
     folder=Path(folder)
+    if eligibility is not None and not eligibility.allowed:
+        st.info('Requested ON analysis is unavailable. Select OFF to restore canonical results.');return
     if (not summary.get('descriptive') or not (folder/'descriptive_measurements.parquet').exists()
             or summary['descriptive'].get('version')!=VERSION):
         return _legacy(folder,summary,frame,parents)
     @st.cache_data(show_spinner=False)
     def load_measurements(release_id,path):
         return pd.read_parquet(Path(path)/'descriptive_measurements.parquet')
-    measurements=load_measurements(summary['release_id'],str(folder))
+    measurements=eligibility.measurements() if eligibility is not None else None
+    if measurements is None:measurements=load_measurements(summary['release_id'],str(folder))
     reading=st.radio('閱讀方式',['研究總覽','跨期比較','時段趨勢'],horizontal=True,key='ds_reading')
     paired=reading=='跨期比較';prefix='dx' if paired else 'ds'
     controls=st.columns(3)
@@ -130,10 +134,15 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
     main=controls[2].selectbox('學校範圍',[True,False],format_func=lambda x:'只限主流學校（研究分析）' if x else '全部學校（首頁口徑）',key=prefix+'_mainstream')
     context=(summary['release_id'],mode,role)
     context_key=prefix+'_context'
-    rows=cohort(frame,parents,measurements,mode,role)
-    options=sorted({r for text in rows['anchor_identity_rules'].dropna() for r in text.split(';') if r})
+    catalogue=eligibility.catalogue(mode,role) if eligibility is not None else None
+    if catalogue is None:catalogue=cohort(frame,parents,measurements,mode,role)
+    try:rows=eligibility.cohort(mode,role) if eligibility is not None else None
+    except ActiveEligibilityUnavailable:
+        st.info('This native cohort is unavailable in the requested ON projection.');return
+    if rows is None:rows=catalogue.copy(deep=True)
+    options=sorted({r for text in catalogue['anchor_identity_rules'].dropna() for r in text.split(';') if r})
     if st.session_state.get(context_key)!=context:
-        valid={'schools':set(rows['anchor_school'].dropna()),'sources':set(rows['anchor_source_type'].dropna()),'rules':set(options)}
+        valid={'schools':set(catalogue['anchor_school'].dropna()),'sources':set(catalogue['anchor_source_type'].dropna()),'rules':set(options)}
         removed=False
         for name,allowed in valid.items():
             key=prefix+'_'+name
@@ -149,8 +158,8 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
         st.caption('跨期以基線固定分組。九組互有重疊，不可相加。')
     with st.expander('進階篩選（留空代表不限）'):
         c=st.columns(3)
-        schools=c[0].multiselect('學校',sorted(rows['anchor_school'].dropna().unique()),key=prefix+'_schools')
-        sources=c[1].multiselect('資料來源',sorted(rows['anchor_source_type'].dropna().unique()),format_func=lambda v:SOURCE_NAMES.get(v,v),key=prefix+'_sources')
+        schools=c[0].multiselect('學校',sorted(catalogue['anchor_school'].dropna().unique()),key=prefix+'_schools')
+        sources=c[1].multiselect('資料來源',sorted(catalogue['anchor_source_type'].dropna().unique()),format_func=lambda v:SOURCE_NAMES.get(v,v),key=prefix+'_sources')
         rules=c[2].multiselect('孩子身份配對規則',options,format_func=lambda v:rule_names.get(v,v),key=prefix+'_rules')
         st.caption('身份規則選項只篩選目前正式樣本；多選符合任一項。清空代表不限，不會重新做身份配對。')
     filters=dict(mainstream=main,schools=schools,sources=sources,rules=rules,group=group)
@@ -179,7 +188,7 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
     buttons=st.columns(2)
     buttons[0].button('清除篩選',on_click=_reset,args=(prefix,),key=prefix+'_reset')
     buttons[1].button('首頁口徑：全部學校、取消篩選',on_click=_reset,args=(prefix,True),key=prefix+'_home')
-    metadata={'mode':mode,'grouping_anchor':anchor,**filters}
+    metadata={'mode':mode,'grouping_anchor':anchor,**filters,**(eligibility.metadata() if eligibility is not None else {})}
     if paired:
         if not _capability(folder,summary):
             st.info('此發布未提供跨期探索能力；研究總覽及原有報表仍可閱讀。發布新版後可使用工作台。')
@@ -204,10 +213,14 @@ def render_descriptive(folder,summary,frame,parents,rule_names):
                 'student_parent_elapsed_gap_days':'家長減學生實際時間差（日）','parent_response_interval_days':'距家長T0實際日數'})
             st.caption('負數表示家長較早，正數表示較遲。學生錨定家長樣本沒有自身90日門檻；獨立家長分支另計。')
             st.dataframe(gaps,hide_index=True,width='stretch')
-            st.download_button('下載目前家長日期差',gaps.to_csv(index=False).encode('utf-8-sig'),
-                'study2-parent-date-gaps.csv','text/csv',key=prefix+'_date_gaps')
-    with st.expander('下載本版四份完整 4.1 報表（主流學校、九個分組）'):
-        st.caption('本版固定報表使用每輪各自有效的定義，不受目前篩選影響。完整配對新統計另列。')
-        for report_mode,name in REPORT_FILES.items():
-            st.download_button(MODES[report_mode],(folder/'4.1_descriptive'/name).read_bytes(),name,
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='ds_report_'+report_mode)
+            from .streamlit_eligibility import stamp_frame,download_name
+            st.download_button('下載目前家長日期差',stamp_frame(gaps,metadata).to_csv(index=False).encode('utf-8-sig'),
+                download_name('study2-parent-date-gaps.csv',metadata),'text/csv',key=prefix+'_date_gaps')
+    with st.expander('Published OFF/reference: four complete 4.1 reports'):
+        st.caption('These original published workbooks use canonical OFF membership and ignore current filters.')
+        if eligibility is not None and eligibility.enabled:
+            st.info('Original OFF/reference workbooks are disabled while ON is requested. Use the current filtered analysis downloads, or select OFF.')
+        else:
+            for report_mode,name in REPORT_FILES.items():
+                st.download_button(MODES[report_mode],(folder/'4.1_descriptive'/name).read_bytes(),'OFF-reference-'+name,
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='ds_report_'+report_mode)

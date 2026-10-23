@@ -95,6 +95,8 @@ def downloads(st, result, prefix, *, stats=None, scale_family=None):
     from .descriptive_dashboard import filtered_workbook
     from .outputs import excel_safe
     basis=result['metadata']['basis']
+    from .streamlit_eligibility import stamp_frame,download_name
+    context=result['metadata']
     if stats is not None:
         # Both the overview and its grouped detail route need the
         # same reproducible CSV metadata. Do not mutate the caller's table.
@@ -113,8 +115,8 @@ def downloads(st, result, prefix, *, stats=None, scale_family=None):
                     st.dataframe(display_table(stats[stats['variable_id'].eq('phq_band')]),hide_index=True,width='stretch')
             else:
                 st.dataframe(display_table(stats),hide_index=True,width='stretch')
-            st.download_button('下載每輪各自有效統計 CSV',excel_safe(stats).to_csv(index=False).encode('utf-8-sig'),
-                f'study2-{prefix}-wave_valid-statistics.csv','text/csv',key=prefix+'_statistics_csv')
+            st.download_button('下載每輪各自有效統計 CSV',excel_safe(stamp_frame(stats,context)).to_csv(index=False).encode('utf-8-sig'),
+                download_name(f'study2-{prefix}-wave_valid-statistics.csv',context),'text/csv',key=prefix+'_statistics_csv')
         labels={'distribution_summary':'分布摘要','histograms':'共同分箱及頻數','pair_summary':'完整配對摘要',
                 'pair_transitions':'二元四格轉移','categories':'分類分布'}
         for name,title in labels.items():
@@ -122,10 +124,10 @@ def downloads(st, result, prefix, *, stats=None, scale_family=None):
             if data.empty:
                 continue
             st.dataframe(data.drop(columns=['filters_json'],errors='ignore'),hide_index=True,width='stretch')
-            st.download_button('下載'+title+' CSV',excel_safe(data).to_csv(index=False).encode('utf-8-sig'),
-                f'study2-{prefix}-{basis}-{name}.csv','text/csv',key=prefix+'_'+name+'_csv')
+            st.download_button('下載'+title+' CSV',excel_safe(stamp_frame(data,context)).to_csv(index=False).encode('utf-8-sig'),
+                download_name(f'study2-{prefix}-{basis}-{name}.csv',context),'text/csv',key=prefix+'_'+name+'_csv')
         st.download_button('下載目前分析 Excel',filtered_workbook(stats,pd.DataFrame(),result['metadata'],exploration=result),
-            f'study2-{prefix}-{basis}.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=prefix+'_xlsx')
+            download_name(f'study2-{prefix}-{basis}.xlsx',context),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=prefix+'_xlsx')
 
 
 def render_overview(rows,role,release_id,*,prefix,groups=('all',),metadata=None):

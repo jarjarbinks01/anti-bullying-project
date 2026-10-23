@@ -58,7 +58,7 @@ const Study2Scope = (() => {
   const equal = (a,b) => JSON.stringify(a)===JSON.stringify(b);
   function validate(index) {
     need(index && index.format===FORMAT, "compatible_scope_export_required");
-    fields(index,["format","meta","sources","surveys","profiles","records","samples","schools"]);
+    fields(index,["format","meta","sources","surveys","profiles","records","samples","schools",...(Object.hasOwn(index,"eligibility")?["eligibility"]:[])]);
     for (const name of ["sources","surveys","profiles","records","samples","schools"]) need(Array.isArray(index[name]),"invalid_array");
     const meta=index.meta;
     fields(meta,["release_id","schema","adult","flow","school","reconciliation"]);
@@ -119,6 +119,10 @@ const Study2Scope = (() => {
       need(r.code!=="BD" || meta.adult.status==="available","unavailable_adult_has_cells");
       if(r.profiles.length===1) singles[r.profiles[0]]+=r.count;
     }
+    if(Object.hasOwn(index,"eligibility")) {
+      const excluded=validateEligibility(index,total,selected);
+      for(const [p,n] of Object.entries(excluded))selected[p]-=n;
+    }
     need(equal(singles,selected),"selected_sample_reconciliation");
     const margins=Object.fromEntries(["A","B","C","D"].map(c=>[c,zeros(index.profiles.map((_,i)=>i))]));
     for(const r of index.samples) if(Object.hasOwn(margins,r.code)) margins[r.code][r.profiles[0]]+=r.count;
@@ -142,6 +146,32 @@ const Study2Scope = (() => {
     for(const [name,keys] of [["records",["profile","exit_stage","reason","original_wave"]],["samples",["code","profiles"]],["schools",["profile","status"]]])
       need(new Set(index[name].map(r=>JSON.stringify(keys.map(k=>r[k])))).size===index[name].length,"duplicate_aggregate_cell");
     return index;
+  }
+  function validateEligibility(index,total,selected) {
+    const e=index.eligibility;
+    fields(e,["format","revision","inventory_revision","baseline_samples","excluded_records","excluded_selected"]);
+    need(e.format==="study2_scope_eligibility_v1" && [e.revision,e.inventory_revision].every(x=>typeof x==="string" && /^[0-9a-f]{64}$/.test(x)),"invalid_scope_eligibility");
+    const {eligibility,...base}=index;validate({...base,samples:e.baseline_samples});
+    const maps=[["excluded_records",total],["excluded_selected",selected]].map(([key,limit])=>{
+      need(Array.isArray(e[key]),"invalid_scope_exclusion_counts");const out={};
+      for(const r of e[key]){fields(r,["profile","count"]);count(r.count);need(Number.isSafeInteger(r.profile)&&Object.hasOwn(total,r.profile)&&!Object.hasOwn(out,r.profile)&&r.count>0&&r.count<=limit[r.profile],"invalid_scope_exclusion_counts");out[r.profile]=r.count;}return out;
+    });
+    const [flagged,removed]=maps;need(Object.entries(removed).every(([p,n])=>n<=(flagged[p]||0)),"excluded_selected_exceeds_flags");
+    const signature=r=>JSON.stringify([r.code,r.profiles]);const before=new Map(e.baseline_samples.map(r=>[signature(r),r.count]));
+    const after=new Map(index.samples.map(r=>[signature(r),r.count]));
+    need(index.samples.every(r=>before.has(signature(r))&&r.count<=before.get(signature(r))),"eligibility_added_members");
+    for(const code of Object.keys(slots)){
+      const lost=e.baseline_samples.filter(r=>r.code===code).map(r=>({...r,count:r.count-(after.get(signature(r))||0)})).filter(r=>r.count);
+      const graph=new Map(),edge=(a,b,n)=>{if(!graph.has(a))graph.set(a,new Map());if(!graph.has(b))graph.set(b,new Map());graph.get(a).set(b,(graph.get(a).get(b)||0)+n);if(!graph.get(b).has(a))graph.get(b).set(a,0);};
+      for(const [p,n]of Object.entries(flagged))edge('start','p'+p,n);
+      let required=0;lost.forEach((r,i)=>{required+=r.count;edge('m'+i,'end',r.count);for(const p of new Set(r.profiles))edge('p'+p,'m'+i,r.count);});
+      let covered=0;
+      while(true){const prev=new Map([['start',null]]),queue=['start'];for(const a of queue){for(const [b,n]of graph.get(a)||[]){if(n&&!prev.has(b)){prev.set(b,a);queue.push(b);}}if(prev.has('end'))break;}
+        if(!prev.has('end'))break;let b='end',amount=required;while(prev.get(b)!==null){const a=prev.get(b);amount=Math.min(amount,graph.get(a).get(b));b=a;}b='end';while(prev.get(b)!==null){const a=prev.get(b);graph.get(a).set(b,graph.get(a).get(b)-amount);graph.get(b).set(a,graph.get(b).get(a)+amount);b=a;}covered+=amount;
+      }
+      need(covered===required,"removed_members_not_supported_by_flags");
+    }
+    return removed;
   }
   function defaults(index) {
     return {sources:index.sources.map(s=>s.key), surveys:index.surveys.map(s=>s.key),start:null,end:null,include_unknown:true};
@@ -212,7 +242,7 @@ const Study2Scope = (() => {
       school.counts=Object.fromEntries(school.statuses.map(s=>[s,zeros(roles)]));
       for(const r of index.schools) if(mask[r.profile]) school.counts[r.status][index.profiles[r.profile].role]+=r.count;
     }
-    return {format:RESULT,release_id:index.meta.release_id,schema:FORMAT,scope,
+    const result={format:RESULT,release_id:index.meta.release_id,schema:FORMAT,scope,
       date_policy:{timezone:"Asia/Hong_Kong",inclusive:true,unknown_excluded:unknownExcluded,
         included_unknown_interval_unverified:Boolean((scope.start || scope.end) && scope.include_unknown && Object.entries(states).some(([k,n])=>k!=="usable" && n>0))},
       raw,out_of_scope:outside,sources,samples,flow,
@@ -221,6 +251,14 @@ const Study2Scope = (() => {
       identity_groups:{status:"unavailable",count:null,unit:"identity_groups",reason:"represented_group_signatures_not_provided"},
       school:JSON.parse(JSON.stringify(school)),reconciliation:{...index.meta.reconciliation,checked:[...index.meta.reconciliation.checked]},
       scope_notice:"First-tab scope only; published matching and other tabs are unchanged."};
+    if(Object.hasOwn(index,"eligibility")){
+      const e=index.eligibility,intake={};
+      for(const role of roles){const baseline=index.records.filter(r=>mask[r.profile]&&index.profiles[r.profile].role===role).reduce((n,r)=>n+r.count,0),excluded=e.excluded_records.filter(r=>mask[r.profile]&&index.profiles[r.profile].role===role).reduce((n,r)=>n+r.count,0);intake[role]={baseline,excluded,retained:baseline-excluded};}
+      const n=(rs,c)=>rs.filter(r=>r.code===c&&r.profiles.every(p=>mask[p])).reduce((n,r)=>n+r.count,0);
+      result.eligibility={format:e.format,mode:'on',revision:e.revision,inventory_revision:e.inventory_revision,intake,samples:Object.keys(slots).map(code=>{if(code==='BD'&&index.meta.adult.status!=='available')return {code,baseline:null,active:null,excluded:null};const baseline=n(e.baseline_samples,code),active=n(index.samples,code);return {code,baseline,active,excluded:baseline-active};})};
+      result.scope_notice='Fixed published members after manual analytical exclusions; raw and stages remain historical.';
+    }
+    return result;
   }
   return Object.freeze({query,validate,defaultSelection:defaults,normalizeSelection:normalize,transitionSelection:transition,catalogueOptions,FORMAT});
 })();

@@ -6,7 +6,7 @@ middleware checks every deployed asset, including the aggregate snapshot.
 import json
 
 PUBLIC_FILES = ('index.html', 'app.js', 'styles.css', 'snapshot.js',
-                'scope-index.js', 'scope-engine.js', 'quality-ui.js',
+                'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js',
                 'snapshot-manifest.json', 'login.html', 'login.css', 'login.js', 'access.js')
 
 ACCESS_CORE = r'''

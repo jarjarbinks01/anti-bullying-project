@@ -43,19 +43,26 @@ def _pair_display(pairs, branch):
     return display.rename(columns=columns)
 
 
-def render_parent_panel(folder, summary):
+def render_parent_panel(folder, summary, *, eligibility=None):
     from .english_ui import st
     from pathlib import Path
     import pandas as pd
     from .dashboard_views import SOURCE_NAMES
     from .outputs import descriptive_summary, excel_safe
 
+    from .streamlit_eligibility import ActiveEligibilityUnavailable,stamp_frame,download_name
+    metadata=eligibility.metadata() if eligibility is not None else {}
+    if eligibility is not None and not eligibility.allowed:
+        st.info('Requested ON independent analysis is unavailable. Select OFF for canonical results.');return
     details = summary.get('independent_parent')
     if details is None:
         st.info('此歷史版本未包含獨立家長分析。')
         return
-    data = read_panel(folder)
+    data=eligibility.canonical_panel() if eligibility is not None else None
+    if data is None:data=read_panel(folder)
     verify_panel(data, details)
+    canonical_data=data
+    impact=eligibility.impact(summary).get('independent') if eligibility is not None else None
     st.subheader('獨立家長分析')
     st.caption('不要求學生問卷作錨點。沿用已確認孩子身份；最早合資格家長回應為共同T0，T1至少相隔90日。這些數字另行計算，不加進首頁BD／E／F／EF。')
     render_release_overview(PanelOverviewFacts(
@@ -63,8 +70,12 @@ def render_parent_panel(folder, summary):
     counts = st.columns(3)
     for col, label, key in zip(counts, ['獨立家長基線', '同一孩子跨期（可換填卷人）', '同一成人跨期'],
                                ['baselines', 'child_report_pairs', 'same_adult_pairs']):
-        col.metric(label, f"{details[key]:,}")
-    st.caption(f"同一成人樣本中有 {details['same_adult_alternative_T1']:,} 組使用不同的T1問卷。成人出生年份缺失或不同，不會自行否定孩子身份；尚未確認同一成人，也不等於已確認換了家長。逐宗人工裁定例外另列，未知年份不猜填。")
+        value=impact[key]['active'] if impact is not None else details[key]
+        col.metric(label, f"{value:,}")
+    if eligibility is not None and eligibility.enabled:
+        st.caption('Counts above use ON original members. Published OFF/reference alternate adult T1 count: '+str(details['same_adult_alternative_T1'])+'. Active pair details retain the exact originally selected follow-up.')
+    else:
+        st.caption(f"同一成人樣本中有 {details['same_adult_alternative_T1']:,} 組使用不同的T1問卷。成人出生年份缺失或不同，不會自行否定孩子身份；尚未確認同一成人，也不等於已確認換了家長。逐宗人工裁定例外另列，未知年份不猜填。")
     branch = st.selectbox('獨立家長樣本', [CHILD, ADULT], format_func=BRANCH_NAMES.get, key='ipp_branch')
     controls = st.columns(3)
     wave = controls[0].selectbox('明細及回應下載輪次（下方統計固定兩輪）', ['T0', 'T1'], key='ipp_wave')
@@ -84,29 +95,39 @@ def render_parent_panel(folder, summary):
     new_reports = bool(summary.get('descriptive')) and summary['descriptive'].get('version') == VERSION
     if new_reports:
         from .descriptives import independent_cohort, filter_cohort
-        measurements = pd.read_parquet(Path(folder)/'descriptive_measurements.parquet')
-        report_rows = independent_cohort(data['analysis'], measurements, branch, paired_only)
+        measurements=eligibility.measurements() if eligibility is not None else None
+        if measurements is None:measurements=pd.read_parquet(Path(folder)/'descriptive_measurements.parquet')
+        mode='independent_adult' if branch==ADULT else 'independent_child' if paired_only else 'independent_all'
+        catalogue=eligibility.catalogue(mode,'parent') if eligibility is not None else None
+        if catalogue is None:catalogue=independent_cohort(data['analysis'],measurements,branch,paired_only)
+        try:report_rows=eligibility.cohort(mode,'parent') if eligibility is not None else None
+        except ActiveEligibilityUnavailable:
+            st.info('This native independent cohort is unavailable for ON.');return
+        if report_rows is None:report_rows=catalogue.copy(deep=True)
         scope_report, _ = filter_cohort(report_rows, mainstream=mainstream)
         unfiltered = report_rows[report_rows['wave'].eq(wave)]
         scope_rows = scope_report[scope_report['wave'].eq(wave)]
+        catalogue_scope,_=filter_cohort(catalogue,mainstream=mainstream)
+        option_rows=catalogue_scope[catalogue_scope['wave'].eq(wave)]
         grouping_basis = (report_rows['grouping_anchor'].iloc[0] if len(report_rows) else '獨立家長T0所指孩子')
     else:
         unfiltered = panel_cohort(data['analysis'], branch, wave, paired_only)
         scope_rows = panel_cohort(data['analysis'], branch, wave, paired_only, mainstream)
         grouping_basis = '逐輪欄位：各輪自身的學校、性別及來源（沒有固定 T0 分組）'
+        option_rows=scope_rows
     filters = st.columns(4)
     gender = filters[0].selectbox('獨立樣本孩子性別', ['全部', '男', '女', '缺失'], key='ipp_gender')
     type_col = 'anchor_school_stage' if new_reports else 'school_type'
     school_col = 'anchor_school' if new_reports else 'school'
     source_col = 'anchor_source_type' if new_reports else 'source_type'
     for key, col in [('ipp_types',type_col), ('ipp_schools',school_col), ('ipp_sources',source_col)]:
-        valid = set(scope_rows[col].dropna())
+        valid = set(option_rows[col].dropna())
         if key in st.session_state and not set(st.session_state[key]) <= valid:
             st.session_state[key] = []
             st.caption('分支或資料範圍已改變，不再適用的進階篩選已清除。')
-    types = filters[1].multiselect('獨立樣本學校類型', sorted(scope_rows[type_col].dropna().unique()), key='ipp_types')
-    schools = filters[2].multiselect('獨立樣本學校', sorted(scope_rows[school_col].dropna().unique()), key='ipp_schools')
-    sources = filters[3].multiselect('獨立樣本資料來源', sorted(scope_rows[source_col].dropna().unique()),
+    types = filters[1].multiselect('獨立樣本學校類型', sorted(option_rows[type_col].dropna().unique()), key='ipp_types')
+    schools = filters[2].multiselect('獨立樣本學校', sorted(option_rows[school_col].dropna().unique()), key='ipp_schools')
+    sources = filters[3].multiselect('獨立樣本資料來源', sorted(option_rows[source_col].dropna().unique()),
                                    format_func=lambda x: SOURCE_NAMES.get(x, x), key='ipp_sources')
     if new_reports:
         report_selected, _ = filter_cohort(report_rows, mainstream=mainstream, schools=schools,
@@ -134,14 +155,15 @@ def render_parent_panel(folder, summary):
         current_n=len(rows),
         exclusion_note=f'學校範圍排除 {len(unfiltered)-len(scope_rows):,} 份，其餘篩選排除 {len(scope_rows)-len(rows):,} 份。N是此輪回應數。預設跨期樣本、全部學校且清除其他篩選，可重現上方對應跨期組數。'))
     st.subheader('配對明細')
-    pairs = pairs_for_cohort(data['pairs'], rows, branch, wave)
+    pair_source=eligibility.independent_pairs(data['pairs'],branch) if eligibility is not None else data['pairs']
+    pairs = pairs_for_cohort(pair_source, rows, branch, wave)
     display = _pair_display(pairs, branch)
     st.dataframe(display, hide_index=True, width='stretch')
     st.caption('每行是一組兩份回應。選全部基線時，尚無T1的基線不會出現在配對表，可從選定回應下載查看。兩套輪次及原始輪次分開保存。')
-    st.download_button('下載獨立家長配對明細', excel_safe(display).to_csv(index=False).encode('utf-8-sig'),
-                       'study2-independent-parent-pairs.csv', 'text/csv')
-    st.download_button('下載目前獨立家長選定回應', excel_safe(rows).to_csv(index=False).encode('utf-8-sig'),
-                       'study2-independent-parent-responses.csv', 'text/csv')
+    st.download_button('下載獨立家長配對明細', excel_safe(stamp_frame(display,metadata)).to_csv(index=False).encode('utf-8-sig'),
+                       download_name('study2-independent-parent-pairs.csv',metadata), 'text/csv')
+    st.download_button('下載目前獨立家長選定回應', excel_safe(stamp_frame(rows,metadata)).to_csv(index=False).encode('utf-8-sig'),
+                       download_name('study2-independent-parent-responses.csv',metadata), 'text/csv')
     st.subheader('獨立家長描述統計')
     if new_reports:
         st.caption('上方輪次只控制明細及該輪回應下載；以下總覽及跨期統計把 T0／T1 並排，時段趨勢另有自己的輪次及日期控制。')
@@ -167,7 +189,8 @@ def render_parent_panel(folder, summary):
                    '孩子分支可換填卷人，其 PHQ 不能直接當作同一成人變化；是否可提供配對 PHQ 仍由既有成人連續性檢查決定，不能以分支名稱當作證據。',
                    '時段趨勢還有自己的輪次及日期控制，此摘要 N 尚未套用它們，期間內 N 在趨勢區另列。')))
         metadata={'branch':branch,'paired_only':paired_only,'mainstream':mainstream,
-                  'gender':gender,'schools':schools,'sources':sources,'school_types':types}
+                  'gender':gender,'schools':schools,'sources':sources,'school_types':types,
+                  **(eligibility.metadata() if eligibility is not None else {})}
         if reading=='研究總覽':
             render_overview(report_selected,'parent',summary['release_id'],prefix='ipp_overview',metadata=metadata)
         elif reading=='時段趨勢':
@@ -180,12 +203,13 @@ def render_parent_panel(folder, summary):
         else:
             render_workbench(report_selected,'parent',summary['release_id'],prefix='ipp_workbench',metadata=metadata)
     else:
-        _legacy_statistics(rows)
+        _legacy_statistics(rows,metadata=metadata)
 
-    _render_panel_audit(data, details)
+    st.caption('Published OFF/reference administrative and experimental audit; manual analytical exclusions do not alter it.')
+    _render_panel_audit(canonical_data, details, metadata=eligibility.metadata(reference=True) if eligibility is not None else {})
 
 
-def _legacy_statistics(rows):
+def _legacy_statistics(rows,*,metadata=None):
     from .english_ui import st
     from .outputs import descriptive_summary
     st.info('此歷史版本未包含新版人口特徵，未提供時段趨勢；以下沿用舊量表摘要。')
@@ -200,11 +224,12 @@ def _legacy_statistics(rows):
     st.dataframe(stats.rename(columns={'metric': '指標', 'sample_n': '樣本N', 'valid_n': '有效N',
                                       'missing_n': '缺失N', 'mean_or_proportion': '平均／比例', 'sd': '標準差'}),
                  hide_index=True, width='stretch')
-    st.download_button('下載獨立家長描述統計', stats.to_csv(index=False).encode('utf-8-sig'),
-                       'study2-independent-parent-descriptives.csv', 'text/csv')
+    from .streamlit_eligibility import stamp_frame,download_name
+    st.download_button('下載獨立家長描述統計',stamp_frame(stats,metadata or {}).to_csv(index=False).encode('utf-8-sig'),
+                       download_name('study2-independent-parent-descriptives.csv',metadata or {}),'text/csv')
 
 
-def _render_panel_audit(data, details):
+def _render_panel_audit(data, details, *, metadata=None):
     from .english_ui import st
     with st.expander('成人電話差一位試算及核實狀態'):
         st.warning('以下是未納入正式同一成人樣本的規則試算，不是已確認配對或準確率。人工限制、出生年份及整組矛盾檢查仍然有效。')
@@ -230,8 +255,9 @@ def _render_panel_audit(data, details):
         candidates['exact_rule'] = candidates['exact_rule'].map(lambda v: ADULT_RULES.get(v, v))
         candidates['verification_label'] = candidates['verification_label'].map(VERIFICATIONS)
         st.dataframe(candidates.rename(columns=candidate_columns), hide_index=True, width='stretch')
-        st.download_button('下載成人電話差一位試算', data['sensitivity'].to_csv(index=False).encode('utf-8-sig'),
-                           'study2-parent-one-digit-experiment.csv', 'text/csv')
+        from .streamlit_eligibility import stamp_frame,download_name
+        st.download_button('Published OFF/reference: adult one-digit experiment',stamp_frame(data['sensitivity'],metadata or {}).to_csv(index=False).encode('utf-8-sig'),
+                           download_name('OFF-reference-study2-parent-one-digit-experiment.csv',metadata or {}),'text/csv')
         st.caption('核實標記只計同版本的既有人工標籤。NOT_REVIEWED_CURRENT_VERSIONS表示尚無本版本核實標籤；不能用child_id一致當作準確率。')
     with st.expander('核對發布數量及處理狀態'):
         st.dataframe(reconcile_panel(data, details), hide_index=True, width='stretch')

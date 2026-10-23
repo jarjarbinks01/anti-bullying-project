@@ -17,6 +17,8 @@ from study2.dashboard_views import (SAMPLE_NAMES, analysis_cohort, selected_samp
                                    sample_reconciliation, sample_display, stage_overview,
                                    source_wave_counts)
 from study2.dashboard_header import HeaderFacts, build_header, render_header, render_missing_release
+from study2.streamlit_eligibility import (ENVIRONMENT_KEY,ActiveEligibilityUnavailable,
+    load_eligibility,render_selector,render_impact,stamp_frame,download_name)
 
 st.set_page_config(page_title="Study 2 研究資料", page_icon="📊", layout="wide")
 cfg = load_config(Path(os.environ.get("STUDY2_CONFIG", Path(__file__).parent / "config.local.json")))
@@ -141,12 +143,29 @@ def imported_source_counts(release_id, state_dir, run_id):
     return counts.drop(columns="source_label")
 
 
+@st.cache_data(show_spinner=False)
+def canonical_parents(release_id,path):
+    target=Path(path)/'parent_longitudinal.parquet'
+    return pd.read_parquet(target) if target.exists() else None
+
+
+manual_manifest_path=os.environ.get(ENVIRONMENT_KEY)
+manual_inputs=load_eligibility(release_path,summary,frame,
+    canonical_parents(release['release_id'],str(release_path)) if manual_manifest_path else None,
+    manifest_path=manual_manifest_path)
+eligibility=render_selector(st,manual_inputs)
+published_imports=imported_source_counts(release['release_id'],cfg['state_dir'],release['run_id'])
+
+
 overview, analysis, independent_parent_tab, evidence_tab, tracking_tab, method = st.tabs(
     ["資料品質及進度", "描述統計", "獨立家長分析", "配對證據", "親子追蹤", "統計口徑"])
 with independent_parent_tab:
     from study2.parent_panel_dashboard import render_parent_panel
-    render_parent_panel(release_path, summary)
+    render_parent_panel(release_path, summary,eligibility=eligibility)
 with overview:
+    intake_totals=published_imports.groupby('role')['submissions'].sum().to_dict()
+    render_impact(st,eligibility,summary,intake_totals)
+    st.caption('Published OFF/reference overview, raw intake, stages and review status are retained below.')
     cols = st.columns(4)
     for c, label, value in zip(cols, ["提交記錄", "學生跨期 AC", "同一成人跨期 BD" if summary.get("bd_requires_same_adult") else "家長回應跨期配對", "跨期親子 EF"], [summary["submissions"], summary["AC"], summary["BD"], summary["EF"]]):
         c.metric(label, f"{value:,}")
@@ -178,12 +197,14 @@ with overview:
                            format_func=lambda value: {"all": "學生＋家長", "student": "只看學生", "parent": "只看家長"}[value],
                            horizontal=True, key="overview_source_role")
     source_counts = source_wave_counts(
-        imported_source_counts(release["release_id"], cfg["state_dir"], release["run_id"]),
-        frame, None if source_role == "all" else source_role)
+        published_imports.copy(deep=True),
+        eligibility.analytical_frame(frame) if eligibility.allowed else frame.copy(deep=True), None if source_role == "all" else source_role)
     st.dataframe(source_counts, hide_index=True, width="stretch")
     st.caption("匯入：2.1.2 合併檔的原始輪次，包含其後被排除的提交。最終：3.1.1 選定輪次，包括全部學校。原標 T1 可推定為 T0，因此兩組輪次分開列出。每份提交只計一次；學生與家長相加是回應數，不是孩子人數。")
-    st.download_button("下載各來源輪次數量", source_counts.to_csv(index=False).encode("utf-8-sig"),
-                       f"study2-source-counts-{source_role}-{release['release_id']}.csv", "text/csv")
+    source_metadata=eligibility.metadata(reference=not eligibility.allowed)
+    st.caption('Imports are canonical history; final columns use the active retained original slots, or explicitly OFF/reference if requested ON is unavailable.')
+    st.download_button('Download current source counts',stamp_frame(source_counts,source_metadata).to_csv(index=False).encode('utf-8-sig'),
+                       download_name(f"study2-source-counts-{source_role}-{release['release_id']}.csv",source_metadata),'text/csv')
     st.subheader("本版本原始來源")
     manifest = json.loads((release_path / "run_manifest.json").read_text())["inputs"]
     source_files = {s["source_id"]: s["file"] for s in manifest["sources"]}
@@ -218,10 +239,10 @@ with overview:
             st.caption("舊流程人工修正未自動套用到這次來源；請使用目前版本的受控審核包。")
         else:
             st.metric("舊人工修正未能遷移",summary.get("legacy_corrections_pending",0))
-    st.download_button("下載版本摘要", (release_path / "summary.json").read_bytes(), "study2-summary.json", "application/json")
+    st.download_button("Download published OFF/reference summary", (release_path / "summary.json").read_bytes(), "OFF-reference-study2-summary.json", "application/json")
 with analysis:
     from study2.descriptive_dashboard import render_descriptive
-    render_descriptive(release_path, summary, sample_frame, parent_frame, rule_names)
+    render_descriptive(release_path, summary, sample_frame, parent_frame, rule_names,eligibility=eligibility)
 
 with method:
     if summary.get('independent_parent'):
@@ -261,39 +282,48 @@ with method:
     - **年級／日期提示**：按香港時間、9月為學年分界及已知小學／中學階段作初步檢查；提示可涉及跳級、年級下降、跨學年不變、階段不明及批次日期。提示不會自行更正、拒配或排除回應。
     """)
 with evidence_tab:
+    st.caption('Final analytical samples use the current eligibility mode. Candidate review remains published OFF/reference and is not changed.')
     view = st.radio("配對證據檢視", ["最終分析樣本（對照首頁）", "候選比較（供審核）"], horizontal=True, key="evidence_view")
     if view.startswith("最終"):
-        sample = st.selectbox("最終樣本", list(SAMPLE_NAMES), format_func=SAMPLE_NAMES.get, key="final_sample")
-        rows = selected_sample(sample_frame, parent_frame, sample)
-        expected = summary.get(sample)
-        count_columns = st.columns(2)
-        unit = "份回應" if sample in "ABCD" else "組"
-        count_columns[0].metric("首頁／版本數量", f"{expected:,} {unit}" if expected is not None else "此版本未列")
-        count_columns[1].metric("最終樣本明細數量", f"{len(rows):,} {unit}")
-        if expected is not None and len(rows) != expected:
-            st.error("最終樣本明細與發布摘要不一致，請先核對版本；不能用候選宗數替代。")
+        if not eligibility.allowed:
+            st.info('Requested ON final samples are unavailable. Select OFF for canonical details.')
         else:
-            st.success("明細數量與首頁／發布版本一致。")
-        if sample == "EF":
-            st.caption("每行是一個孩子的學生T0、家長T0、學生T1、家長T1，共四份回應。可更換家長填卷人。")
-        elif sample in "ABCD":
-            st.caption("每行是一份最終選定回應。包括全部學校，與首頁各輪樣本數一致。")
-        else:
-            st.caption("每行是一組兩份最終選定回應，包括全部學校。只列實際納入該樣本的提交，不列其他重填或額外候選。")
-        if sample == "BD":
-            st.caption("使用BD專用的同一成人選擇；家長T1可與D／F的最新家長回應不同。")
-        if sample in {"E", "F", "EF"}:
-            st.caption('親子確認指向同一孩子；家長按學生香港日期分輪，日期差另列。' if student_anchored else '親子確認指向同一孩子，不限制學生與家長日期差。')
-        display = sample_display(rows, sample)
-        for column in display:
-            if column.endswith("_孩子身份規則"):
-                display[column] = display[column].fillna("").map(lambda value: "；".join(rule_names.get(rule, rule) for rule in value.split(";") if rule))
-            if column.endswith("_日期依據"):
-                display[column] = display[column].map({"system_creation":"系統建立時間", "batch_assigned_creation":"批次指定建立時間"}).fillna(display[column])
-        st.dataframe(display, hide_index=True, width="stretch")
-        st.download_button("下載目前最終樣本明細", display.to_csv(index=False).encode("utf-8-sig"), f"study2-{sample}-{release['release_id']}.csv", "text/csv")
-        with st.expander("核對全部樣本數量"):
-            st.dataframe(sample_reconciliation(sample_frame, parent_frame, summary), hide_index=True, width="stretch")
+            try:
+                sample = st.selectbox("最終樣本", list(SAMPLE_NAMES), format_func=SAMPLE_NAMES.get, key="final_sample")
+                rows=eligibility.sample_rows(sample_frame,parent_frame,sample)
+                expected=eligibility.sample_count(sample,rows,summary)
+                count_columns = st.columns(2)
+                unit = "份回應" if sample in "ABCD" else "組"
+                count_columns[0].metric("Active original-member count" if eligibility.enabled else "首頁／版本數量", f"{expected:,} {unit}" if expected is not None else "此版本未列")
+                count_columns[1].metric("最終樣本明細數量", f"{len(rows):,} {unit}")
+                if expected is not None and len(rows) != expected:
+                    st.error("最終樣本明細與發布摘要不一致，請先核對版本；不能用候選宗數替代。")
+                else:
+                    st.success("Detail agrees with the active original-membership projection." if eligibility.enabled else "明細數量與首頁／發布版本一致。")
+                if sample == "EF":
+                    st.caption("每行是一個孩子的學生T0、家長T0、學生T1、家長T1，共四份回應。可更換家長填卷人。")
+                elif sample in "ABCD":
+                    st.caption("每行是一份最終選定回應。包括全部學校，與首頁各輪樣本數一致。")
+                else:
+                    st.caption("每行是一組兩份最終選定回應，包括全部學校。只列實際納入該樣本的提交，不列其他重填或額外候選。")
+                if sample == "BD":
+                    st.caption("使用BD專用的同一成人選擇；家長T1可與D／F的最新家長回應不同。")
+                if sample in {"E", "F", "EF"}:
+                    st.caption('親子確認指向同一孩子；家長按學生香港日期分輪，日期差另列。' if student_anchored else '親子確認指向同一孩子，不限制學生與家長日期差。')
+                display = sample_display(rows, sample)
+                for column in display:
+                    if column.endswith("_孩子身份規則"):
+                        display[column] = display[column].fillna("").map(lambda value: "；".join(rule_names.get(rule, rule) for rule in value.split(";") if rule))
+                    if column.endswith("_日期依據"):
+                        display[column] = display[column].map({"system_creation":"系統建立時間", "batch_assigned_creation":"批次指定建立時間"}).fillna(display[column])
+                st.dataframe(display, hide_index=True, width="stretch")
+                evidence_metadata=eligibility.metadata()
+                st.download_button("下載目前最終樣本明細",stamp_frame(display,evidence_metadata).to_csv(index=False).encode("utf-8-sig"),download_name(f"study2-{sample}-{release['release_id']}.csv",evidence_metadata),"text/csv")
+                with st.expander("核對全部樣本數量"):
+                    st.dataframe(eligibility.reconciliation(sample_frame,parent_frame,summary),hide_index=True,width="stretch")
+
+            except ActiveEligibilityUnavailable:
+                st.info('This native sample has no compatible original membership evidence for ON.')
     evidence_path = release_path / "candidate_evidence.parquet"
     if view.startswith("候選") and not evidence_path.exists():
         st.info("此舊版本沒有配對證據摘要。")
@@ -365,6 +395,7 @@ with evidence_tab:
         st.download_button("下載目前候選證據摘要", display_evidence.to_csv(index=False).encode("utf-8-sig"), "study2-pair-evidence.csv", "text/csv")
 
 with tracking_tab:
+    st.caption('Published OFF/reference administrative tracking. Analytical exclusions do not change registrations, invitations or decisions.')
     from study2.dyad_operator import STATES, FOLLOWUPS, readable_reason, safe_note
     st.subheader("永久親子追蹤")
     st.caption("每個永久ID追蹤同一孩子的家庭，換填卷家長仍沿用。兄弟姊妹各自登記。家長是否同一成人仍按BD規則判斷。")
