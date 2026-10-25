@@ -657,6 +657,11 @@ def validate_snapshot(snapshot):
         elif isinstance(value, str) and forbidden.search(value):
             raise PipelineError('靜態快照含有識別碼、個人聯絡或本機路徑。')
     visit(snapshot)
+    if 'release_context' in snapshot:
+        from .static_release_context import validate_release_context
+        validate_release_context(snapshot['release_context'], public=True)
+        if snapshot['release_context']['release_id'] != snapshot['release_id']:
+            raise PipelineError('Dashboard release context identifies a different release.')
     validate_grade(snapshot)
     validate_sources(snapshot)
     json.dumps(plain(snapshot), allow_nan=False)
@@ -775,6 +780,8 @@ def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=Non
         if manual_exclusion is not None:
             manifest['manual_exclusion'] = {k: manual_exclusion[k] for k in
                 ('format', 'hash_scheme', 'status', 'revision', 'inventory_revision', 'on_revision')}
+        if 'release_context' in snapshot:
+            manifest['release_context'] = snapshot['release_context']
         (stage / 'snapshot-manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         if verify_inputs:
             verify_inputs()
@@ -837,7 +844,10 @@ def _input_inventory(folder, state, release_root):
             'release_location_mapping': _file_pin(state / 'release_locations.json')}
 
 
-def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None, manual_manifest=None):
+def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None, manual_manifest=None,
+                  release_context=None, default_eligibility='off'):
+    if default_eligibility not in {'off', 'on'} or default_eligibility == 'on' and release_context is None:
+        raise PipelineError('Default ON requires an explicit validated dashboard release context.')
     state = Path(cfg['state_dir']).resolve()
     raw_destination = Path(destination).absolute()
     if raw_destination.is_symlink():
@@ -880,19 +890,37 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
         pins['legacy_source_counts'] = dict(sha256=digest(source_counts))
         pins['supplied_school_binding'] = dict(sha256=digest(school_binding)) if school_binding is not None else None
         pins['supplied_manual_manifest'] = dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None
-        initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest'}}
+        pins['supplied_release_context'] = dict(sha256=digest(release_context)) if release_context is not None else None
+        run = None
+        if release_context is not None:
+            from .static_release_context import validate_release_context
+            from .runner import program_hash
+            validate_release_context(release_context)
+            run = db.execute('SELECT run_id, fingerprint FROM runs WHERE run_id=?', (release['run_id'],)).fetchone()
+            if run is None:
+                raise PipelineError('Dashboard release context requires its recorded analytical run.')
+            run = dict(run)
+            pins['analytical_run'] = dict(sha256=digest(run))
+            pins['export_program_hash'] = dict(sha256=program_hash())
+        initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest', 'supplied_release_context', 'analytical_run', 'export_program_hash'}}
         def verify():
             now = current(db)
             counts_now = sorted(imported_source_counts(db, release['run_id']), key=lambda row: json.dumps(row, sort_keys=True))
             if (now != release or _input_inventory(folder, state, release_root) != initial_files or
                     digest(counts_now) != pins['legacy_source_counts']['sha256'] or
                     (dict(sha256=digest(school_binding)) if school_binding is not None else None) != pins['supplied_school_binding'] or
-                    (dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None) != pins['supplied_manual_manifest']):
+                    (dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None) != pins['supplied_manual_manifest'] or
+                    (dict(sha256=digest(release_context)) if release_context is not None else None) != pins['supplied_release_context'] or
+                    (run is not None and dict(db.execute('SELECT run_id, fingerprint FROM runs WHERE run_id=?',
+                        (release['run_id'],)).fetchone() or {}) != run) or
+                    (run is not None and program_hash() != pins['export_program_hash']['sha256'])):
                 raise PipelineError('Published inputs or pointer changed during export; previous export retained.')
         scope = build_scope_export(folder, summary, minimum, school_binding=school_binding)
         snapshot = build_snapshot(folder, summary, imported, minimum, progress)
         snapshot['published_at'] = release['created_at']
         manual_export = None
+        if release_context is not None and manual_manifest is None:
+            raise PipelineError('Dashboard release context requires an accepted composed manifest.')
         if manual_manifest is not None:
             from .manual_exclusion_export import build_manual_export
             with gzip.open(folder / 'records.jsonl.gz', 'rt', encoding='utf-8') as handle:
@@ -905,8 +933,14 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             if summary.get('independent_parent'):
                 from .parent_panel_views import read_panel
                 panel = read_panel(folder)
+            if release_context is not None:
+                from .static_release_context import bind_release_context
+                snapshot['release_context'] = bind_release_context(release_context, release, summary,
+                    run['fingerprint'], records, manual_manifest, default_eligibility=default_eligibility)
             manual_export = build_manual_export(snapshot, scope, records, analysis, parents,
                 measurements, summary, imported, manual_manifest, panel=panel, progress=progress)
+            if release_context is not None and manual_export['status'] != 'available':
+                raise PipelineError('Dashboard release context requires a complete valid ON/OFF export.')
         verify()
         return write_site(snapshot, destination, scope_export=scope,
                           manual_exclusion=manual_export, verify_inputs=verify, input_inventory=pins)
@@ -918,8 +952,20 @@ def main():
     parser = argparse.ArgumentParser(description='Study 2 aggregate-only static export')
     parser.add_argument('--config', type=Path, default=Path('config.local.json'))
     parser.add_argument('--output', type=Path, default=Path('static_dashboard'))
+    parser.add_argument('--manual-manifest', type=Path, help='Exact accepted private composed exclusion manifest')
+    parser.add_argument('--release-context', type=Path, help='Strict current-run aggregate control provenance')
+    parser.add_argument('--default-eligibility', choices=('off', 'on'), default='off',
+                        help='Explicit initial analytical mask; ON requires a validated release context')
     args = parser.parse_args()
-    print(json.dumps(export_static(load_config(args.config), args.output), ensure_ascii=False))
+    def supplied(path):
+        if path is None:
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise PipelineError('Supplied export metadata must be a regular private JSON file.')
+        return json.loads(path.read_bytes())
+    print(json.dumps(export_static(load_config(args.config), args.output,
+        manual_manifest=supplied(args.manual_manifest), release_context=supplied(args.release_context),
+        default_eligibility=args.default_eligibility), ensure_ascii=False))
 
 
 if __name__ == '__main__':
