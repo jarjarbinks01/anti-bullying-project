@@ -137,3 +137,46 @@ Dashboard「一般身份審核」每行為一個孩子群組或一宗成人比�
 兩位同事各 20 宗，其中 5 宗重疊、獨立審核，共 35 宗不同個案。兩包不帶其他同事答案。先在 Mac／Windows Excel 開啟、選下拉選單、填理由、跳轉、儲存及交回。執行者記錄：能否自行完成、有沒有跨案例填錯、所有分歧能否追查，以及有效答案能否完成批准、套用、重跑及發布。
 
 只有完成同事試用及兩個 Excel 桌面環境驗收後，才取代日常平面匯出入口。程式自動測試及版面渲染不等同同事試用，也不證明真實配對準確度。
+
+## Reversible group-cleaning controls
+
+`python -m study2.group_cleaning_operator` is a separate, human-invoked local workflow. It projects review work and analytical exclusions from a pinned published inventory. It does not write scientific decisions, change identities, select replacement T0/T1 responses, republish data or update the dashboard automatically. The existing review-card and dashboard queue interfaces keep their original behavior.
+
+### Routing and exclusions
+
+- Keep established child subgroups and accepted direct links intact. Inspect all original members when assessing cross-subgroup evidence. Contradictory identity fields, manual restrictions, exact contacts across unconfirmed subgroups and uncertain contacts remain on hold.
+- Route concrete cross-subgroup questions using the existing normalized phone similarity rule: one digit differs, or two positions exchange digits. Distinct email addresses are not compared fuzzily. Exact phone and email identity evidence remains protected.
+- Close comparisons with known, nonblank contacts that have no phone similarity under the reversible separation policy. This is not a permanent NONMATCH. An explicitly authorized partition can preserve the existing subgroups without creating new links; it cannot split an established subgroup.
+- Propose burst exclusions only when more than five established child identities share one verified genuine source and the complete timestamp range is at most 120 seconds. Original timestamps need an explicit timezone and second or subsecond precision. Batch-assigned dates, missing source proof and chained short windows do not qualify. A candidate does not establish fraud.
+- Store new flags in a separate ledger. Combine them with the existing accepted exclusion manifest through the shared eligibility projection, including independent parent analysis. Exact submission/version masks remove original members without selecting replacements. Existing flags and their history remain separate.
+
+### Prepare private inputs
+
+An operator must prepare and inspect a private input bundle before using this CLI. It does not import a workbook or discover source records. Keep bundles, proposals, acceptance records, ledgers and projected results outside Git and online exports.
+
+The bundle format is `study2_group_cleaning_inputs_v1`. It binds a release ID, active decision/label revision and scientific rules hash, and pins each input by absolute local path and SHA-256. Required inputs are `config`, `records`, `cases`, `groups`, `decisions`, `eric_manifest` (the existing accepted exclusion manifest), `source_evidence`, `authorization`, `partitions` and `user_exclusions`. Optional `analysis` and `parents` Parquet inputs enable native cohort counts. The consumed file bytes are verified before parsing. Explicit partitions and user exclusions also require the authorized workbook/request hashes and exact group scope.
+
+Use a new, dedicated control directory, separate from pipeline state and the original manual-exclusion registry. Files below use generic relative example paths; the bundle's pinned input paths must be absolute.
+
+```sh
+python -m study2.group_cleaning_operator dry-run --bundle private/group-cleaning/inputs.json --output private/group-cleaning/proposal.json
+
+# An independent reviewer inspects this exact proposal before creating acceptance.json.
+python -m study2.group_cleaning_operator apply --bundle private/group-cleaning/inputs.json --control-root private/group-cleaning/control --proposal private/group-cleaning/proposal.json --review private/group-cleaning/acceptance.json --operator 'operator-code' --reason 'Reviewed proposal accepted'
+
+python -m study2.group_cleaning_operator status --bundle private/group-cleaning/inputs.json --control-root private/group-cleaning/control --output private/group-cleaning/status.json
+python -m study2.group_cleaning_operator project --bundle private/group-cleaning/inputs.json --control-root private/group-cleaning/control --output private/group-cleaning/projection.json
+
+# Use the exact active manifest hash reported in the control pointer.
+python -m study2.group_cleaning_operator undo --bundle private/group-cleaning/inputs.json --control-root private/group-cleaning/control --expected-head ACTIVE_MANIFEST_HASH --operator 'operator-code' --reason 'Reviewed rollback'
+```
+
+The acceptance format is `study2_group_cleaning_acceptance_v1`, with exactly `format`, `proposal_revision`, `accepted`, `reviewer`, `reason` and `review_manifest_sha256`. Acceptance must be true and bound to the inspected proposal; the reviewer, reason and review-manifest hash are required. Do not reuse acceptance after changing inputs or implementation.
+
+### Refresh, interruption and rollback
+
+Apply rechecks input hashes, publication, scientific rules and active decisions under the existing writer lock. A busy writer or stale context blocks activation. Complete immutable generations and their receipts are written before replacing `CURRENT.json`. Retrying the same accepted operation is idempotent; interrupted generations and earlier ledgers remain available for inspection.
+
+For an updated inventory, `carry --bundle NEW_BUNDLE --control-root CONTROL --output NEW_CARRY_FILE` previews carry-forward of unchanged exact submission/version/role/raw-hash targets. Add that file as the pinned `carry` input in a new bundle, recompute the bundle revision, and obtain a new proposal and independent acceptance before applying. Missing or changed targets block carry; no CSV or contact rematching occurs. A `prior_policy_manifest` input and `carry` input cannot be supplied together.
+
+Undo also requires the expected active head. A prior generation with incompatible source, inventory or decisions is rejected before staging or pointer mutation. Keep the current view active and prepare a compatible reviewed operation instead of forcing an older pointer into a newer inventory. These controls retain all history and leave scientific publication as a separate operation.
