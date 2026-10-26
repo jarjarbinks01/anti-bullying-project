@@ -254,3 +254,24 @@ def test_disabling_latest_only_policy_keeps_its_referenced_ledger_checkpoint(pro
     assert save_checkpoint(cfg)['verified_recovery']
     assert len(list((state/'checkpoints').glob('CHECKPOINT_*')))==1
     live=connect(state,readonly=True);recovery_check(live,cfg);live.close()
+
+
+@pytest.mark.parametrize('policy', [None, {'latest_complete_only': False}])
+def test_preserve_all_retains_every_prior_checkpoint_and_ledger(tmp_path, monkeypatch, policy):
+    from study2 import checkpoints
+    state = tmp_path / 'state'
+    for name in ('CHECKPOINT_old_a', 'CHECKPOINT_old_b', 'CHECKPOINT_new'):
+        folder = state / 'checkpoints' / name
+        folder.mkdir(parents=True)
+        (folder / 'retained').write_text(name)
+    ledger = state / 'DYAD_LEDGER.json'
+    ledger.write_text(json.dumps({'bundle': str(state / 'legacy_bundle'), 'hash': 'synthetic'}))
+    before = {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()}
+    cfg = {'state_dir': str(state)}
+    if policy is not None:
+        cfg['checkpoint_policy'] = policy
+    def forbidden_prune(*args):
+        raise AssertionError('Preserve-all must not invoke a destructive cleanup')
+    monkeypatch.setattr(checkpoints, '_prune_full_copies', forbidden_prune)
+    checkpoints._finish_retention(cfg, state / 'checkpoints/CHECKPOINT_new')
+    assert {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()} == before

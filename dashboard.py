@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import study2
 from study2.english_ui import st
 
 from study2.common import load_config, digest, file_hash
@@ -19,6 +20,7 @@ from study2.dashboard_views import (SAMPLE_NAMES, analysis_cohort, selected_samp
 from study2.dashboard_header import HeaderFacts, build_header, render_header, render_missing_release
 from study2.streamlit_eligibility import (ENVIRONMENT_KEY,ActiveEligibilityUnavailable,
     load_eligibility,render_selector,render_impact,stamp_frame,download_name)
+from study2.review_workload import render_current_review_workload
 
 st.set_page_config(page_title="Study 2 研究資料", page_icon="📊", layout="wide")
 cfg = load_config(Path(os.environ.get("STUDY2_CONFIG", Path(__file__).parent / "config.local.json")))
@@ -106,7 +108,7 @@ def review_workload(release_id, state_dir, policy_hash, decisions, workspace_rev
 review_files = [Path(cfg['state_dir']) / ('review.sqlite' + suffix) for suffix in ('', '-wal')]
 review_revision = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None for p in review_files)
 dispatch = review_workload(release['release_id'], cfg['state_dir'],
-    digest([file_hash(Path(__file__).parent/'study2'/name) for name in ('review_dispatch.py','review_groups.py','review_core.py')]), decision_revision, review_revision, cfg)
+    digest([file_hash(Path(study2.__file__).parent/name) for name in ('review_dispatch.py','review_groups.py','review_core.py')]), decision_revision, review_revision, cfg)
 if dispatch['release_id'] != release['release_id']:
     st.info('資料正在更新，請重新讀取目前版本。')
     st.stop()
@@ -213,7 +215,12 @@ with overview:
                  hide_index=True, width="stretch")
     st.caption("此版本只讀取以上登記檔案。原始提交數包括未完成及之後被排除的回應，並非獨立參與者人數。")
     st.caption("全部樣本按選定回應計數。身份尚未釐清時，不能把回應數直接當作已確認的獨立孩子人數。")
+    render_current_review_workload(st, release_id=release['release_id'],
+        decision_revision=decision_revision, exclusion_revision=manual_inputs.revision)
     with st.expander("資料核實與更新狀態"):
+        st.subheader('Historical native dispatch (before accepted group/exclusion policy)')
+        st.caption('The native routing figures below retain historical evidence and pending statuses. '
+                   'They are not the current actionable worklist; use Current review workload above.')
         review_columns = st.columns(3)
         review_columns[0].metric('身份審核工作（群組／成人）', dispatch['remaining_general_reviews'])
         review_columns[1].metric('有聯絡的資料更正比較', dispatch['pending_routes'].get('correction', 0))
@@ -328,6 +335,9 @@ with evidence_tab:
     if view.startswith("候選") and not evidence_path.exists():
         st.info("此舊版本沒有配對證據摘要。")
     elif view.startswith("候選"):
+        st.subheader('Historical native candidate evidence')
+        st.caption('The original native routing, filter options and evidence rows are retained. '
+                   'Pending here is a historical native status before accepted group/exclusion policy, not a current assignment.')
         evidence = pd.read_parquet(evidence_path)
         group_rows = pd.DataFrame(dispatch.get('groups', []))
         if not group_rows.empty:
@@ -339,7 +349,8 @@ with evidence_tab:
         selected_route = {'一般身份審核':'review','證據不足，待新資料（暫不合併）':'awaiting_evidence','資料更正（有可用聯絡）':'correction','無可用聯絡，不派審':'untraceable'}.get(usage)
         if selected_route:
             evidence = evidence[(evidence['route'] == selected_route) & evidence['status'].eq('pending')]
-            st.caption('這個用途只列目前待處理的比較，與首頁資料核實工作量使用同一口徑。查看已有結論或背景比較，請選「全部候選（含背景參考）」。')
+            st.caption('This filter retains the native pending comparisons from the historical routing snapshot. '
+                       'Current actionable workload is shown in the overview panel; completed and background evidence remain available under all candidates.')
         if "review_warnings" not in evidence:
             evidence["review_warnings"] = ""
         only_hints = st.checkbox("只看有年級／日期提示的候選", key="only_review_hints")
@@ -364,7 +375,8 @@ with evidence_tab:
         elif selected_route == 'awaiting_evidence':
             st.caption('每行是一個孩子群組或一宗成人比較。各已確認子群及其 T0／T1 保留；沒有新增不配對裁定。已有新問卷或具體可核實來源時再評估，這份清單不要求助手逐宗填卡。')
         else:
-            st.caption('原始兩份比較及群組任務是不同單位，不能相加當作人工工作量或參加者人數。查看目前派工數請選「一般身份審核」；重現首頁研究樣本數請切換「最終分析樣本」。')
+            st.caption('Original pair comparisons and group tasks use different units and cannot be added as people or workload. '
+                       'Use the overview Current review workload panel for current assignments and final analytical samples for cohort counts.')
         st.caption("摘要只顯示欄位是否一致，不顯示完整電話、電郵或生日；詳細核實及修改使用受控Excel。")
         display_evidence = evidence.copy()
         display_evidence['route'] = display_evidence['route'].map(ROUTES)
@@ -389,6 +401,9 @@ with evidence_tab:
         for col in ["日期來源A", "日期來源B"]:
             display_evidence[col] = display_evidence[col].map({"system_creation":"系統建立時間", "batch_assigned_creation":"批次指定建立時間"})
         preview_limit = 1000 if selected_route == 'review' else 500
+        st.caption('This table is historical native comparison/group evidence. Accepted group closures, researcher answers and '
+                   'manual exclusions are accounted for in the separately bound Current review workload summary; '
+                   'these retained rows do not reopen completed work.')
         st.dataframe(display_evidence.head(preview_limit), hide_index=True, width="stretch")
         if len(display_evidence) > preview_limit:
             st.caption(f"表格預覽前 {preview_limit:,} 宗；下載包含全部 {len(display_evidence):,} 宗篩選結果。")

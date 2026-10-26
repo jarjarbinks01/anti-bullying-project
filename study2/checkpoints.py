@@ -249,6 +249,8 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
 
 def _finish_retention(cfg,final):
     """Promote the ledger before pruning; retry unfinished cleanup on reuse."""
+    if not cfg.get('checkpoint_policy',{}).get('latest_complete_only'):
+        return
     state=Path(cfg['state_dir']);final=Path(final)
     tracking=final/'recovered_tracking/manifest.json'
     pointer=state/'DYAD_LEDGER.json'

@@ -219,6 +219,11 @@ def main():
     sched = sub.add_parser("schedule")
     sched.add_argument("--install", action="store_true")
     sub.add_parser("dashboard")
+    ac = sub.add_parser('student-ac-export', help='Export complete selected student AC pairs locally, with all source and current fields')
+    ac.add_argument('--output', type=Path, required=True, help='New private destination directory; never overwritten')
+    ac.add_argument('--exclusion-manifest', type=Path, help='Accepted release-bound manifest, required for ON')
+    ac.add_argument('--manual-exclusions', choices=['on', 'off'], default='on')
+    ac.add_argument('--dataset-version', default='student_ac_full_v1')
     static = sub.add_parser('static-export', help='匯出可部署的唯讀彙總 HTML，不發布到網絡')
     static.add_argument('--output', type=Path, default=PACKAGE_ROOT / 'static_dashboard')
     args = parser.parse_args()
@@ -228,7 +233,16 @@ def main():
         else:
             cfg = load_config(args.config)
             state = Path(cfg["state_dir"])
-            if args.command == 'static-export':
+            if args.command == 'student-ac-export':
+                from .ac_export import export_student_ac
+                if args.manual_exclusions == 'on' and args.exclusion_manifest is None:
+                    raise PipelineError('ON export requires an explicit accepted exclusion manifest')
+                result = export_student_ac(cfg, args.output, manifest_path=args.exclusion_manifest,
+                    enabled=args.manual_exclusions == 'on', dataset_version=args.dataset_version)
+                result = {key: result[key] for key in ('format', 'dataset_version', 'release_id', 'run_id',
+                    'manual_exclusion', 'row_count', 'unique_children', 'selected_student_records',
+                    'column_count', 'output_dir', 'csv_path', 'manifest_path', 'manifest_sha256') if key in result}
+            elif args.command == 'static-export':
                 from .static_export import export_static
                 result = export_static(cfg, args.output,
                     progress=lambda text: print('建立彙總：' + text, file=sys.stderr, flush=True))

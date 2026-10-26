@@ -347,3 +347,61 @@ identical import is an idempotent no-op. The ledger rejects pending SQLite
 journal/WAL/SHM sidecars with `registry_recovery_required`; preserve those
 files for explicit local recovery. This ledger is separate from research
 decisions and does not change identity, wave selection or published samples.
+
+## Fresh analytical release and current group-review workload
+
+Calculate and independently reconcile a new isolated analytical release before
+export. A later export timestamp does not make an older analytical run current.
+Keep original native and independent-parent members; analytical exclusion masks
+them without choosing replacements. OFF is retained exactly; the accepted
+composed manifest supplies ON.
+
+Explicitly supply both private JSON inputs. Neither the ledger nor record-level
+evidence belongs in the output.
+
+```bash
+PYTHONPATH="<REVIEWED_CODE>" "<PROJECT_PYTHON>" -m study2.static_export \
+  --config "<ISOLATED_FRESH_RELEASE_CONFIG>" --output "<NEW_EXPORT_DIRECTORY>" \
+  --manual-manifest "<EXACT_ACCEPTED_COMPOSED_MANIFEST>" \
+  --release-context "<RECONCILED_AGGREGATE_RELEASE_CONTEXT>" --default-eligibility on
+```
+
+The closed `study2_dashboard_release_context_v1` identifies the selected
+release/run, stored run fingerprint and calculation program hash; group
+control/proposal/implementation and review-control revisions; composed flag
+manifest/inventory revisions and original/group/overlap/union counts; and current
+child/phone/held groups, correction comparisons/bundles and adult comparisons.
+All revisions are SHA256 and counts are nonnegative integers. Its `revision`
+uses `analysis_eligibility.sha` over the input without `revision`. The constants
+and validator in `study2.static_release_context` define the exact closed schema.
+
+The calculation owner constructs these aggregates from actual current controls;
+the independent reviewer reconciles that evidence. Schema/hash validation alone
+does not approve invented work counts. The exporter binds the input to its
+selected recorded run, summary and exact accepted flag manifest; checks union
+counts and grouping arithmetic; and requires a complete valid ON/OFF export.
+Invalid metadata or drift before installation preserves the previous site. It
+does not discover private controls or approve changed source versions. Only the
+closed aggregate context, export code hash and fixed workload scope go online.
+
+The explicit `--default-eligibility on` option requests ON for this export only;
+the default remains OFF, including when a context is supplied without that option.
+An ON request requires the validated context and manifest. Browser validation failure shows
+requested-ON unavailable; a user may deliberately choose OFF. OFF remains the
+original corrected analytical release, not an older run. Exports without this
+context retain their prior OFF default.
+
+Current review work is separate from historical candidate inventory. Phone/held
+groups partition open child groups. Correction bundles and their comparisons
+describe the same work at different levels, and records may overlap between
+categories. Do not add groups, bundles, comparisons or participants. Workload is
+release-wide under its pinned applied controls; analytical ON/OFF and sample,
+source, date and grade filters do not change it. Historical candidate status is
+a discovery audit, never a substitute for current researcher work.
+
+Snapshot JSON, scoped first-tab JSON and CSVs retain release/control/flag
+provenance alongside existing eligibility and filter metadata. The deployment
+manifest also carries the aggregate context. IDs, contacts, paths, workbooks,
+decision/correction rows, ledgers, configuration and credentials stay local.
+Preserve the complete protected export and authentication assets for the
+deployment owner's separate checks.
