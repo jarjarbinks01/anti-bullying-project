@@ -27,6 +27,7 @@ from .descriptives import (cohort, filter_cohort, independent_cohort, paired_cha
                            statistics, wave_counts)
 from .store import connect, current
 from .static_access import ACCESS_FILES, PUBLIC_FILES
+from .static_period_assets import PERIOD_FILES
 from .static_scope import (ADULT_POLICY, ScopeError, build_scope_index,
                            default_selection, normalize_selection, query_scope, validate_index)
 from .static_english_catalog import (CATALOGUE_VERSION, bd_sample_text,
@@ -38,7 +39,7 @@ from .static_sources import (CODES as SOURCE_CODES, build_pairs as source_pairs,
 FORMAT = 'study2_static_v1'
 DEPLOY_FILES = {'index.html', 'app.js', 'styles.css', 'snapshot.js', 'vercel.json',
                 'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js',
-                '.vercelignore', 'snapshot-manifest.json', *ACCESS_FILES}
+                '.vercelignore', 'snapshot-manifest.json', *ACCESS_FILES, *PERIOD_FILES}
 SCOPE_EXPORT_FORMAT = 'study2_static_scope_export_v1'
 STAT_FIELDS = ['wave', 'group', 'variable_id', 'variable', 'section', 'kind', 'unit',
                'sample_n', 'valid_n', 'missing_n', 'outside_range_n', 'mean', 'sd',
@@ -664,6 +665,12 @@ def validate_snapshot(snapshot):
             raise PipelineError('Dashboard release context identifies a different release.')
     validate_grade(snapshot)
     validate_sources(snapshot)
+    if 'period_selection' in snapshot:
+        from .static_period_assets import validate_catalog
+        validate_catalog(snapshot['period_selection'], snapshot['release_id'])
+        minimum = snapshot.get('minimum_cell_n', 0)
+        if type(minimum) is not int or minimum < 0 or snapshot['period_selection']['minimum_cell_n'] != minimum:
+            raise PipelineError('Period catalog and snapshot suppression thresholds differ.')
     json.dumps(plain(snapshot), allow_nan=False)
 
 
@@ -720,11 +727,18 @@ def _owned_deployment(destination):
 
 
 def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=None,
-               verify_inputs=None, input_inventory=None):
+               verify_inputs=None, input_inventory=None, period_assets=None):
     from .static_assets import APP_JS, HTML, STYLES
     from .static_scope_client import JS_SOURCE as SCOPE_JS
     from .static_quality_ui import JS_SOURCE as QUALITY_JS
     validate_snapshot(snapshot)
+    from .static_period_assets import empty_assets, validate_assets
+    if 'period_selection' in snapshot:
+        if period_assets is None:
+            raise PipelineError('Combined period assets are required for their declared catalog.')
+        validate_assets(snapshot['period_selection'], period_assets, snapshot['release_id'])
+    else:
+        period_assets = empty_assets(snapshot['release_id'])
     if scope_export is None:
         scope_export = unavailable_scope('compatible_scope_export_required', snapshot['release_id'])
     validate_scope_export(scope_export, snapshot)
@@ -750,7 +764,7 @@ def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=Non
     try:
         html = HTML if 'src="manual-exclusion.js"' in HTML else HTML.replace(
             '<script defer src="app.js">', '<script defer src="manual-exclusion.js"></script><script defer src="app.js">')
-        contents = {**ACCESS_FILES, 'index.html': html, 'app.js': APP_JS, 'styles.css': STYLES,
+        contents = {**ACCESS_FILES, **period_assets, 'index.html': html, 'app.js': APP_JS, 'styles.css': STYLES,
                     'snapshot.js': 'window.STUDY2_SNAPSHOT=' + json.dumps(plain(pack_snapshot(snapshot)), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-index.js': 'window.STUDY2_SCOPE_EXPORT=' + json.dumps(plain(scope_export), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-engine.js': SCOPE_JS, 'quality-ui.js': QUALITY_JS,
@@ -918,21 +932,26 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
         scope = build_scope_export(folder, summary, minimum, school_binding=school_binding)
         snapshot = build_snapshot(folder, summary, imported, minimum, progress)
         snapshot['published_at'] = release['created_at']
+        # Fine date/profile moments live only in separately lazy-loaded assets.
+        # The same OFF/ON catalog is immutable in both snapshots, preserving the
+        # existing exclusion wrapper's strict metadata comparison and hashes.
+        analysis = pd.read_parquet(folder / 'analysis.parquet')
+        parent_path = folder / 'parent_longitudinal.parquet'
+        parents = pd.read_parquet(parent_path) if parent_path.exists() else None
+        measurements = pd.read_parquet(folder / 'descriptive_measurements.parquet')
+        panel = None
+        if summary.get('independent_parent'):
+            from .parent_panel_views import read_panel
+            panel = read_panel(folder)
+        records = None
+        if manual_manifest is not None:
+            with gzip.open(folder / 'records.jsonl.gz', 'rt', encoding='utf-8') as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
         manual_export = None
         if release_context is not None and manual_manifest is None:
             raise PipelineError('Dashboard release context requires an accepted composed manifest.')
         if manual_manifest is not None:
             from .manual_exclusion_export import build_manual_export
-            with gzip.open(folder / 'records.jsonl.gz', 'rt', encoding='utf-8') as handle:
-                records = [json.loads(line) for line in handle if line.strip()]
-            analysis = pd.read_parquet(folder / 'analysis.parquet')
-            parent_path = folder / 'parent_longitudinal.parquet'
-            parents = pd.read_parquet(parent_path) if parent_path.exists() else None
-            measurements = pd.read_parquet(folder / 'descriptive_measurements.parquet')
-            panel = None
-            if summary.get('independent_parent'):
-                from .parent_panel_views import read_panel
-                panel = read_panel(folder)
             if release_context is not None:
                 from .static_release_context import bind_release_context
                 snapshot['release_context'] = bind_release_context(release_context, release, summary,
@@ -941,9 +960,26 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
                 measurements, summary, imported, manual_manifest, panel=panel, progress=progress)
             if release_context is not None and manual_export['status'] != 'available':
                 raise PipelineError('Dashboard release context requires a complete valid ON/OFF export.')
+        from .static_period_assets import prepare_assets
+        accepted_on = manual_export is not None and manual_export['status'] == 'available'
+        period_catalog, period_assets = prepare_assets(analysis, parents, measurements, summary,
+            records=records, manifest=manual_manifest if accepted_on else None,
+            panel=panel, minimum=minimum, progress=progress)
+        snapshot['period_selection'] = period_catalog
+        if manual_export is not None:
+            # Add the same validated lazy index to both immutable snapshots.
+            # Only an already valid ON bundle can authorize an ON period cube.
+            from .analysis_eligibility import sha
+            from .manual_exclusion_export import validate_manual_export
+            manual_export['off']['snapshot_revision'] = sha(plain(pack_snapshot(snapshot)))
+            if accepted_on:
+                manual_export['on']['snapshot']['period_selection'] = plain(period_catalog)
+                manual_export['on_revision'] = sha(manual_export['on'])
+            validate_manual_export(manual_export, snapshot, scope)
         verify()
         return write_site(snapshot, destination, scope_export=scope,
-                          manual_exclusion=manual_export, verify_inputs=verify, input_inventory=pins)
+                          manual_exclusion=manual_export, verify_inputs=verify, input_inventory=pins,
+                          period_assets=period_assets)
     finally:
         db.close()
 
