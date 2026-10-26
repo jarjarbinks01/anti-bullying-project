@@ -286,3 +286,19 @@ The browser independently checks active policy, supported versions, complete
 unique cells, finite moments and count/moment reconciliation. Positive-threshold
 legacy callers omit the entire header and all grade data; this compatibility
 boundary adds no masking to the minimum0 researcher configuration.
+
+
+## Full student AC CSV for local research
+
+Use a new private directory for each export. The command reads the currently published release and does not run the pipeline or change the publication. ON is the default and requires an explicit accepted, release-bound exclusion manifest:
+
+```sh
+python -m study2 --config private/config.json student-ac-export --output private/ac-export-v1 --exclusion-manifest private/accepted-exclusions.json --manual-exclusions on --dataset-version student_ac_full_v1
+# To export the published reference membership, choose --manual-exclusions off explicitly.
+```
+
+Each wide row contains one selected student's T0 and T1. The exporter uses native `project_eligibility(...).members['AC']`; removing either selected response removes the whole pair and never selects a replacement. A missing score does not remove an otherwise valid AC pair. All schools, sources, grades and dates are retained; no parent response rows are joined.
+
+The fields are separated into `T0_`/`T1_` and `record__`, `current__`, `source__`, `analysis__`: record/version/date provenance, current corrected answers, original source-cell values, and published analytical fields. Full numerical precision is retained; structured values are JSON text, and missing values remain blank. The CSV uses UTF-8 with BOM. Import identifiers and source strings into Excel as Text to preserve leading zeros and original date text.
+
+The new directory also records column definitions and release/source/manifest provenance. Existing output is never overwritten. Source hashes, exact pair membership and all-cell CSV round trips are checked before the exporter returns successfully; a changed current publication or input blocks completion. This export contains individual-level research data and must remain local, outside Git and aggregate dashboard/deployment folders. It is separate from the aggregate-only dashboard downloads.

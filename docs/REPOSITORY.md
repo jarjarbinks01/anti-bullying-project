@@ -36,3 +36,8 @@ python3 tools/repository_guard.py --history HEAD
 程式安裝及第一次來源登記見 [README](../README.md)。已有研究 state 的電腦不重複 `init`。來源變更依既有受控流程處理；不能為了讓 Git 看起來乾淨而刪除本機檔案。
 
 升級程式前保留可還原備份。研究規則改變時重新驗證、產生新發布版本及審核所需個案；Git commit 不是資料發布，不能代替研究批准。
+
+
+## Checkpoint retention modes
+
+`checkpoint_policy.latest_complete_only: true` permits the existing verified latest-checkpoint cleanup. When the flag is false or absent, checkpoint completion preserves every earlier checkpoint and recovery asset, and does not rewrite the existing tracking-ledger pointer. Creating or reusing a checkpoint still verifies recovery before updating its current-checkpoint pointer. Git changes do not alter a live local retention policy or initiate cleanup.
