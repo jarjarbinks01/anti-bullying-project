@@ -5,9 +5,11 @@ middleware checks every deployed asset, including the aggregate snapshot.
 """
 import json
 
+from .static_period_assets import PERIOD_FILES
+
 PUBLIC_FILES = ('index.html', 'app.js', 'styles.css', 'snapshot.js',
                 'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js',
-                'snapshot-manifest.json', 'login.html', 'login.css', 'login.js', 'access.js')
+                'snapshot-manifest.json', 'login.html', 'login.css', 'login.js', 'access.js', *PERIOD_FILES)
 
 ACCESS_CORE = r'''
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';

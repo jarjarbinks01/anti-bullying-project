@@ -124,10 +124,54 @@ are decoded without numerical changes. Custom grade rules remain unchanged.
 New source unions support wave summaries and formal pair summaries. Overview
 pair summaries require the matrix and All grades. New union p-values and
 Cohen's dz are unavailable; no browser inference is fitted. Source-filtered
-histograms, transitions and periods are unavailable. Missing overview pair
+histograms and transitions are unavailable. Legacy source-filtered periods are
+also unavailable unless the separate protected period catalog described below
+is present. Missing overview pair
 evidence leaves valid wave summaries visible but removes the paired block.
 Custom grades remove overview paired output. No unfiltered result is used as
 a fallback.
+
+### Combined calendar-response filters
+
+New minimum-zero protected researcher exports include a separate
+`study2_period_filters_v1` catalog. Trends can intersect one demographic group,
+an arbitrary union of grades, a union of sources, school scope and inclusive
+Hong Kong dates. Academic years run from 1 September through 31 August and are
+derived from the available dates. Empty grade/source selections mean no
+responses; missing or incompatible assets never fall back to unfiltered data.
+
+The original published cohort remains fixed. Formal longitudinal samples keep
+their native baseline grade, demographic and source anchors across waves;
+each response is then included by its own observation date. Per-wave parent E/F
+views use student demographics and the displayed parent's source. Independent
+parent views retain the existing parent anchors. The screen and CSV report the
+exact anchor names. Calendar-response means are not complete-pair means or
+estimates of individual change, and this path produces no paired tests.
+
+Sparse cells partition observed Hong Kong days, waves, anchor gender/stage,
+grade, source, school scope and date provenance. Pooling uses valid counts,
+means and M2, including between-cell variance; it never averages group means
+or adds overlapping named groups. Binary prevalence uses its numerator and
+valid denominator. Sample, valid, missing and outside-range N remain separate;
+unavailable columns remain distinct from collected columns with zero valid N.
+System and manually verified dates are included by default. Accepted batch
+dates are optional; unknown or invalid dates remain in exclusion diagnostics.
+
+One file per sample/respondent/exclusion scope is loaded on entering Trends,
+with at most three cached files. Catalog hashes bind the assets to their
+release and accepted exclusion revision. Changing scope cannot display a
+stale asynchronous result. All 22 finite filenames are managed in the output
+manifest and protected by the existing login gate. OFF and ON snapshots share
+the same immutable catalog; ON data exist only for a valid accepted manifest.
+
+Whole-period and clipped monthly downloads retain full numeric precision,
+filter selections, date bounds, anchors, denominator definition, date-quality
+exclusions, format, release and exclusion revision. They contain no permanent
+IDs, school names, contacts, DOBs, raw timestamps or individual answers.
+Fine intersections can still have small N, so these assets are available only
+in the protected researcher profile with `minimum_cell_n=0`. Positive-threshold
+exports contain unavailable placeholders rather than fine cells. This format
+does not itself authorize publication or deployment.
 
 The returned `source_status` is all, single, pooled, empty or unavailable.
 `source_capabilities` separately names statistics, paired_summaries, inference,
