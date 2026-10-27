@@ -4,9 +4,45 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .common import PipelineError, dumps
+
+
+_VALUE_CACHE = ContextVar('study2_record_value_cache', default=None)
+
+
+@contextmanager
+def record_value_cache(db, max_bytes=4 * 1024 * 1024):
+    """Reuse verified immutable values within one owned write transaction only.
+
+    The caller must not commit, roll back or use savepoints inside this scope.
+    Mutable objects are never keys: canonical bytes are checked on every call.
+    Exiting (including failure) discards all entries before transaction completion.
+    """
+    if _VALUE_CACHE.get() is not None:
+        raise PipelineError('Record value cache scopes cannot be nested')
+    state = {'db': db, 'values': OrderedDict(), 'bytes': 0, 'limit': max_bytes}
+    token = _VALUE_CACHE.set(state)
+    try:
+        yield state
+    finally:
+        state['values'].clear()
+        state['bytes'] = 0
+        _VALUE_CACHE.reset(token)
+
+
+def _remember_value(cache, payload, checksum, size):
+    if cache is None or size > cache['limit']:
+        return
+    while cache['values'] and (cache['bytes'] + size > cache['limit'] or len(cache['values']) >= 2048):
+        _, (_, old_size) = cache['values'].popitem(last=False)
+        cache['bytes'] -= old_size
+    cache['values'][payload] = (checksum, size)
+    cache['bytes'] += size
 
 
 RECORD_SCHEMA = """
@@ -103,18 +139,27 @@ def install_records(db):
 
 def _value(db, value, source_version=None, source_field=None):
     payload = dumps(value)
-    h = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    cache = _VALUE_CACHE.get()
+    if cache is not None and (cache['db'] is not db or not db.in_transaction):
+        cache = None
+    if cache is not None and payload in cache['values']:
+        cache['values'].move_to_end(payload)
+        return cache['values'][payload][0]
+    encoded = payload.encode('utf-8')
+    h = hashlib.sha256(encoded).hexdigest()
     old = db.execute('SELECT payload_json FROM record_value_json WHERE value_hash=?', (h,)).fetchone()
     if old:
         # Source JSON remains byte-exact in its original table. Legacy strings
         # may use different whitespace, so compare their canonical values.
         if old[0] != payload and dumps(json.loads(old[0])) != payload:
             raise PipelineError('Record value hash collision or corrupt stored content')
+        _remember_value(cache, payload, h, len(encoded))
         return h
     if source_version:
         db.execute('INSERT INTO record_values VALUES(?,NULL,?,?)', (h, source_version, source_field))
     else:
         db.execute('INSERT INTO record_values VALUES(?,?,NULL,NULL)', (h, payload))
+    _remember_value(cache, payload, h, len(encoded))
     return h
 
 

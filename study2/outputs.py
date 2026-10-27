@@ -130,7 +130,7 @@ def export_row(record: dict) -> dict:
 
 def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_queue: list[dict], schemas: dict,
                   adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None,
-                  independent_parent_panel=None, panel_labels=None) -> dict:
+                  independent_parent_panel=None, panel_labels=None, *, formatted_reports=True) -> dict:
     if independent_parent_panel is not None:
         # Output-only overlay: preserve validated independent-parent exceptions
         # for all report surfaces without changing source records or waves.
@@ -378,7 +378,8 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
         summary['independent_parent'] = write_parent_panel(
             folder, independent_parent_panel, by_id, analysis_row, panel_labels or {})
     from .descriptive_reports import prepare_reports
-    summary['descriptive'] = prepare_reports(folder, by_id, scored_ids, analysis_row, ef)
+    summary['descriptive'] = prepare_reports(folder, by_id, scored_ids, analysis_row, ef,
+                                             formatted=formatted_reports)
     from .artifacts import freeze_file
     for p in folder.glob('*.parquet'):freeze_file(p,p)
     return summary

@@ -119,6 +119,15 @@ def current(db: sqlite3.Connection) -> dict | None:
 
 
 def ingest(db, run_id: str, records: list[dict]) -> None:
+    # Source versions are immutable. Avoid reserializing their full source
+    # payloads merely to execute INSERT OR IGNORE for an existing version.
+    versions = list({r['version_id'] for r in records})
+    existing = {}
+    for start in range(0, len(versions), 500):
+        batch = versions[start:start + 500]
+        for row in db.execute('SELECT version_id,submission_id,raw_hash FROM submission_versions '
+                              'WHERE version_id IN (' + ','.join('?' for _ in batch) + ')', batch):
+            existing[row[0]] = (row[1], row[2])
     seen = set()
     for record in records:
         sid = record["submission_id"]
@@ -129,8 +138,12 @@ def ingest(db, run_id: str, records: list[dict]) -> None:
         if previous and (previous["role"] != record["role"] or previous["source_key"] != record["source_key"]):
             raise PipelineError("Immutable submission identity changed; source requires review")
         db.execute("INSERT OR IGNORE INTO submissions VALUES(?,?,?,?,?)", (sid, record["source_key"], record["role"], record["source_id"], utcnow()))
-        db.execute("INSERT OR IGNORE INTO submission_versions VALUES(?,?,?,?,?,?,?)", (
-            record["version_id"], sid, record["raw_hash"], dumps(record["raw"]), dumps(record["answer"]), dumps(record["location"]), utcnow()))
+        saved = existing.get(record['version_id'])
+        if saved is not None and saved != (sid, record['raw_hash']):
+            raise PipelineError('Immutable source version binding changed')
+        if saved is None:
+            db.execute("INSERT INTO submission_versions VALUES(?,?,?,?,?,?,?)", (
+                record["version_id"], sid, record["raw_hash"], dumps(record["raw"]), dumps(record["answer"]), dumps(record["location"]), utcnow()))
         db.execute("INSERT INTO run_records VALUES(?,?,?)", (run_id, sid, record["version_id"]))
 
 

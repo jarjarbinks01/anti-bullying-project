@@ -59,12 +59,23 @@ def workspace(cfg):
 def backup_workspace(cfg, reason="manual"):
     if not (Path(cfg["state_dir"]) / "review.sqlite").exists():
         return None
-    folder = Path(cfg["state_dir"]) / "review_backups"
-    secure_directory(folder)
-    path = folder / ("review_" + reason.replace("/", "_") + "_" + uuid.uuid4().hex + ".sqlite")
+    from .lean_recovery import enabled, sqlite_revision, cached_review, record_review_cache
+    lean = enabled(cfg)
+    live = Path(cfg['state_dir']) / 'review.sqlite'
     db = workspace(cfg)
     try:
+        revision = sqlite_revision(live) if lean else None
+        reused = cached_review(cfg, revision) if lean else None
+        if reused:
+            if sqlite_revision(live) != revision:
+                raise PipelineError('Review workspace changed during backup reuse')
+            return reused
+        folder = Path(cfg['state_dir']) / 'review_backups'
+        secure_directory(folder)
+        path = folder / ('review_' + reason.replace('/', '_') + '_' + uuid.uuid4().hex + '.sqlite')
         backup(db, path)
+        if lean and sqlite_revision(live) != revision:
+            raise PipelineError('Review workspace changed during backup capture')
     finally:
         db.close()
     # Keep legacy logical paths, sharing only verified immutable snapshots.
@@ -72,6 +83,8 @@ def backup_workspace(cfg, reason="manual"):
     h, obj = publish_object(Path(cfg['state_dir']) / 'artifact_objects', path)
     copy_object(obj, path)
     atomic_json(path.with_suffix('.sha256.json'), {'snapshot_sha256': h})
+    if lean:
+        record_review_cache(cfg, revision, path, h)
     return str(path)
 
 

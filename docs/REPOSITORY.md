@@ -41,3 +41,26 @@ python3 tools/repository_guard.py --history HEAD
 ## Checkpoint retention modes
 
 `checkpoint_policy.latest_complete_only: true` permits the existing verified latest-checkpoint cleanup. When the flag is false or absent, checkpoint completion preserves every earlier checkpoint and recovery asset, and does not rewrite the existing tracking-ledger pointer. Creating or reusing a checkpoint still verifies recovery before updating its current-checkpoint pointer. Git changes do not alter a live local retention policy or initiate cleanup.
+
+## Lean recovery (opt in)
+
+Set `recovery_policy.mode` to `lean` and explicitly inventory external controls
+and runtime dependencies in `recovery_policy.required_assets` (an empty list is
+valid only when there are no external dependencies). Each entry supplies an
+absolute `path`, a `dependencies/`-relative `restore_path`, and a `kind` of `file`
+or `directory`. Do not register secrets or an entire virtual environment.
+
+Lean recovery reuses content-verified unchanged review/ledger snapshots and
+immutable checkpoint assets. The final bundle captures eligibility manifests,
+review dispositions and registered dependencies; changed bundles still undergo
+restore, integrity and foreign-key verification before atomic promotion.
+`CHECKPOINT_RETENTION_PLAN.json` is review-only: lean mode never deletes historical
+backups, even when the legacy latest-only setting is enabled. Keep a designated
+previous rollback and any external launch dependencies in `protected_paths`.
+
+Seven presentation-only modules are excluded from the scientific fingerprint;
+shared calculations and unknown modules remain included. Full code provenance
+is still captured. Switching fingerprint schemes can trigger a one-time new
+calculation. Existing records, decisions and deployed snapshots are not changed
+by installing this code. Repeated full hashing and the first changed checkpoint
+remain costs; this is not an incremental database-backup implementation.

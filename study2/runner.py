@@ -16,7 +16,7 @@ from .matching import assign_children, link_records, select_waves
 from .outputs import write_excel, write_outputs
 from .review import active_decisions, apply_field_decisions, validation_report
 from .store import backup, backup_path, connect, current, ingest, writer_lock
-from .storage import read_records, store_record
+from .storage import read_records, store_record, record_value_cache
 from .artifacts import artifact_cache, freeze_file, logical_hash
 
 
@@ -24,15 +24,21 @@ def program_hash() -> str:
     return digest({p.name: file_hash(p) for p in sorted(Path(__file__).parent.glob("*.py"))})
 
 
+def calculation_hash(cfg):
+    from .lean_recovery import enabled, scientific_program_hash
+    return scientific_program_hash(Path(__file__).parent) if enabled(cfg) else program_hash()
+
+
 def fingerprint(cfg, manifest, db):
     from .legacy import legacy_files
     from .dyads import administrative_fingerprint
     inputs = sorted(manifest["sources"], key=lambda r: r["source_id"])
-    return digest({"inputs": inputs, "code": program_hash(), "mappings": cfg["mapping_hashes"],
+    return digest({"inputs": inputs, "code": calculation_hash(cfg), "mappings": cfg["mapping_hashes"],
                    "dictionary": file_hash(Path(cfg["state_dir"]) / "school_dictionary.xlsx"),
                    "decisions": [d["payload"] for d in active_decisions(db)],
                    "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")],
                    "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy"), cfg.get("parent_wave_policy")],
+                   "formatted_descriptive_reports": cfg.get('output_policy', {}).get('formatted_descriptive_reports', 'eager'),
                    "source_folder": cfg.get("source_folder", "1.1_raw_file"), "source_registry": cfg["sources"],
                    "legacy_sources": {str(p.relative_to(cfg["project_root"])):file_hash(p) for p in legacy_files(cfg)},
                    "permanent_registration": administrative_fingerprint(db)})
@@ -59,6 +65,9 @@ def baseline_comparison(cfg, summary):
 
 
 def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
+    report_policy = cfg.get('output_policy', {}).get('formatted_descriptive_reports', 'eager')
+    if report_policy not in {'eager', 'on_demand'}:
+        raise PipelineError('Unknown formatted descriptive report policy')
     state = Path(cfg["state_dir"])
     with writer_lock(state):
         db = connect(state)
@@ -101,7 +110,7 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                 db.execute("UPDATE runs SET fingerprint=? WHERE run_id=?", (fp,run_id))
             groups, cases, events = link_records(records, decisions, cfg.get("matching_policy", {}))
             cases += input_repeat_cases
-            with db:
+            with db, record_value_cache(db):
                 ingest(db, run_id, records)
                 children = assign_children(db, run_id, groups)
                 from .parent_panel import build_parent_panel
@@ -146,7 +155,8 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             print("Writing versioned outputs and audit tables", flush=True)
             with artifact_cache(state/'artifact_objects',folder):
                 summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows,
-                                        independent_parent_panel=parent_panel, panel_labels=panel_labels)
+                                        independent_parent_panel=parent_panel, panel_labels=panel_labels,
+                                        formatted_reports=report_policy == 'eager')
             summary["permanent_registration"] = dyads.validate_staging(db, run_id, records, cases, cfg)
             summary["manual_decisions_reopened"] = sum(e["status"] == "reopened" for e in events)
             summary["legacy_corrections_pending"] = sum(r["migration_status"].startswith("pending") for r in migration)
