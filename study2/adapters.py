@@ -52,10 +52,25 @@ def modules(cfg: dict):
     return result
 
 
-def read_source(path: Path, entry: dict, online) -> pd.DataFrame:
+def read_source(path: Path, entry: dict, online, *, headers_only=False) -> pd.DataFrame:
     if entry["kind"] == "qualtrics":
         return online.read_qualtrics_csv(str(path))
-    return pd.read_excel(path, sheet_name=entry.get("sheet", 0))
+    sheet = entry.get('sheet', 0)
+    if not headers_only:
+        return pd.read_excel(path, sheet_name=sheet)
+    # pandas nrows=0 alone misses trailing unnamed columns with body values.
+    # Use the declared worksheet width to detect that ambiguous case and fall
+    # back to the full reader. Formatting-only extra columns can also trigger
+    # the conservative fallback; they never change the registered schema.
+    with pd.ExcelFile(path) as excel:
+        if excel.engine != 'openpyxl':
+            return excel.parse(sheet_name=sheet)
+        worksheet = excel.book[sheet] if isinstance(sheet, str) else excel.book.worksheets[sheet]
+        width = worksheet.max_column
+        header = excel.parse(sheet_name=sheet, nrows=0)
+        if width is None or width > len(header.columns):
+            return excel.parse(sheet_name=sheet)
+        return header
 
 
 def source_root(cfg: dict) -> Path:
@@ -83,7 +98,7 @@ def make_manifest(cfg: dict, exported_at: str | None = None) -> dict:
     online, _, _ = modules(cfg)
     selected = discover(cfg)
     for source in selected:
-        frame = read_source(source_root(cfg) / source["file"], source, online)
+        frame = read_source(source_root(cfg) / source["file"], source, online, headers_only=True)
         if set(map(str, frame.columns)) != set(source["columns"]):
             raise PipelineError(f"Unregistered columns in {source['source_id']}; approve schema change before running")
     return {"manifest_version": 1, "created_at": utcnow(), "exported_at": exported_at,

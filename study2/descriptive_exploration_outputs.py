@@ -13,27 +13,28 @@ FILES = {key:'descriptive_'+key+'.parquet' for key in TABLES}
 MANIFEST = 'descriptive_exploration_manifest.json'
 
 
-def write_exploration(folder, measurements, frame, parents, release_id):
+def write_exploration(folder, measurements, frame, parents, release_id, *, prepared=None):
     folder=Path(folder)
     collected={key:[] for key in TABLES}; coverage=[]
-    def add(rows, role, paired):
-        selected,_=filter_cohort(rows)
+    def add(rows, role, paired, *, already_selected=False):
+        selected=rows if already_selected else filter_cohort(rows)[0]
         result=explore(selected,role,GROUPS,release_id,paired=paired,metadata={'mainstream':True})
         for key in TABLES:
             collected[key].append(result[key])
         coverage.append({k:result['metadata'][k] for k in ['mode','role','basis']})
     for mode in MODES:
         for role in ['student','parent']:
-            rows=cohort(frame,parents,measurements,mode,role)
-            add(rows,role,False)
+            rows=(prepared[mode,role][1] if prepared is not None else
+                  filter_cohort(cohort(frame,parents,measurements,mode,role))[0])
+            add(rows,role,False,already_selected=True)
             if mode in {'acbd','efmatched'}:
-                add(rows,role,True)
+                add(rows,role,True,already_selected=True)
     independent=folder/'independent_parent_analysis.parquet'
     if independent.exists():
         source=pd.read_parquet(independent)
         for branch in ['child_report','same_adult']:
-            rows=independent_cohort(source,measurements,branch,True)
-            add(rows,'parent',False);add(rows,'parent',True)
+            rows=filter_cohort(independent_cohort(source,measurements,branch,True))[0]
+            add(rows,'parent',False,already_selected=True);add(rows,'parent',True,already_selected=True)
     artifacts={}
     for key,filename in FILES.items():
         data=pd.concat(collected[key],ignore_index=True)

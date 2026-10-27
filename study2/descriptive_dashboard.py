@@ -218,9 +218,6 @@ def render_descriptive(folder,summary,frame,parents,rule_names,*,eligibility=Non
                 download_name('study2-parent-date-gaps.csv',metadata),'text/csv',key=prefix+'_date_gaps')
     with st.expander('Published OFF/reference: four complete 4.1 reports'):
         st.caption('These original published workbooks use canonical OFF membership and ignore current filters.')
-        if eligibility is not None and eligibility.enabled:
-            st.info('Original OFF/reference workbooks are disabled while ON is requested. Use the current filtered analysis downloads, or select OFF.')
-        else:
-            for report_mode,name in REPORT_FILES.items():
-                st.download_button(MODES[report_mode],(folder/'4.1_descriptive'/name).read_bytes(),'OFF-reference-'+name,
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='ds_report_'+report_mode)
+        from .descriptive_reports import render_reference_downloads
+        render_reference_downloads(st, folder, summary,
+                                   exclusions_on=eligibility is not None and eligibility.enabled)

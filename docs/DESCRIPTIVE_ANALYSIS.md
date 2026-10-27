@@ -302,3 +302,23 @@ Each wide row contains one selected student's T0 and T1. The exporter uses nativ
 The fields are separated into `T0_`/`T1_` and `record__`, `current__`, `source__`, `analysis__`: record/version/date provenance, current corrected answers, original source-cell values, and published analytical fields. Full numerical precision is retained; structured values are JSON text, and missing values remain blank. The CSV uses UTF-8 with BOM. Import identifiers and source strings into Excel as Text to preserve leading zeros and original date text.
 
 The new directory also records column definitions and release/source/manifest provenance. Existing output is never overwritten. Source hashes, exact pair membership and all-cell CSV round trips are checked before the exporter returns successfully; a changed current publication or input blocks completion. This export contains individual-level research data and must remain local, outside Git and aggregate dashboard/deployment folders. It is separate from the aggregate-only dashboard downloads.
+
+## Optional formatted reports
+
+The default `output_policy.formatted_descriptive_reports` is `eager`. A compatible
+reader may select `on_demand` to defer the four formatted 4.1 workbooks while
+retaining numeric statistics, membership, scores and audit outputs. The manifest
+records the deferred files and pins the numeric inputs. Older dashboard readers
+require the default eager mode.
+
+To generate the saved canonical OFF/reference reports without recalculation:
+
+```sh
+python -m study2.descriptive_reports --release /absolute/release/RUN_ID --output /absolute/new-report-folder
+```
+
+The destination must be new and outside the frozen release. The compatible
+Streamlit reader offers explicit Prepare buttons and continues to disable these
+OFF/reference downloads while exclusions are ON. Shared report cohorts last
+only for one preparation operation; record-value reuse is bounded to one write
+transaction. Neither cache crosses data or decision revisions.

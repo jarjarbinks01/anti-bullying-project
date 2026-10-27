@@ -63,8 +63,14 @@ def restore_checkpoint(folder,destination,verify_only=False):
             if entry.get('gzip'):_unpack(source,target,entry['uncompressed_sha256'])
             else:
                 secure_directory(target.parent);shutil.copy2(source,target);target.chmod(0o600)
-        for name in ['study2.sqlite','review.sqlite']:
-            p=destination/name
+        sqlite_paths=[destination/name for name in ['study2.sqlite','review.sqlite']]
+        for name in manifest['files']:
+            if not name.startswith('dependencies/'):continue
+            entry=manifest['files'][name]
+            path=destination/_safe_relative(entry.get('restore_path',name))
+            with path.open('rb') as stream:
+                if stream.read(16)==b'SQLite format 3\0':sqlite_paths.append(path)
+        for p in sqlite_paths:
             if not p.exists():continue
             db=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True)
             try:
@@ -75,6 +81,17 @@ def restore_checkpoint(folder,destination,verify_only=False):
         config.update(state_dir=str(destination),release_dir=str(destination/'releases'),
                       mapping_dir=str(destination/'code/mappings'),project_root=str(destination/'source_project'),
                       inbox_dir=str(destination/'inbox'))
+        bindings=manifest.get('recovery_bindings')
+        if bindings:
+            environment={name:str(destination/_safe_relative(relative)) if relative!='.' else str(destination)
+                         for name,relative in bindings['environment'].items()}
+            atomic_json(destination/'recovery_environment.json',environment)
+            relocated=[]
+            for item in bindings.get('external_dependencies',[]):
+                relocated.append({**item,'path':str(destination/_safe_relative(item['restore_path']))})
+            config['recovery_policy']={**config.get('recovery_policy',{}),'required_assets':relocated}
+            atomic_json(destination/'recovery_paths.json',{
+                source:str(destination/_safe_relative(relative)) for source,relative in bindings['source_to_restore'].items()})
         atomic_json(destination/'config.restored.json',config)
         if manifest.get('release_id'):
             new_path=destination/'releases'/manifest['release_id']
@@ -95,11 +112,15 @@ def restore_checkpoint(folder,destination,verify_only=False):
         shutil.rmtree(destination,ignore_errors=True);raise
 
 
-def _add_asset(folder,manifest,source,relative):
+def _add_asset(folder,manifest,source,relative,object_root=None):
     source=Path(source);relative=_safe_relative(relative);target=folder/relative
     if source.is_symlink() or not source.is_file():raise PipelineError('Checkpoint asset must be a regular file')
     original=file_hash(source)
-    secure_directory(target.parent);shutil.copy2(source,target);target.chmod(0o600)
+    if object_root is not None:
+        from .artifacts import freeze_file
+        freeze_file(source,target,root=object_root)
+    else:
+        secure_directory(target.parent);shutil.copy2(source,target);target.chmod(0o600)
     if file_hash(target)!=original or file_hash(source)!=original:raise PipelineError('Checkpoint asset changed while being captured')
     manifest['files'][str(relative)]={'sha256':original,'restore_path':str(relative)}
 
@@ -132,10 +153,15 @@ def _asset_inventory(cfg,main):
             if p.is_file() and not p.is_symlink() and p.name not in {'backup.sqlite','backup.sqlite.gz','backup.retention.json'}:
                 relative=Path('releases')/release['release_id']/p.relative_to(release_path)
                 assets[str(relative)]=p
+    from .lean_recovery import enabled, recovery_assets
+    if enabled(cfg):
+        for name,p in recovery_assets(cfg).items():
+            if name in assets and assets[name]!=p:raise PipelineError('Recovery asset destination collision')
+            assets[name]=p
     return release,dict(sorted(assets.items()))
 
 
-def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes):
+def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,old_manifest=None):
     from .dyad_operator import TABLES
     from .store import current
     release=current(main)
@@ -146,19 +172,37 @@ def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes):
             if logical_hash(release_path/name)!=h:raise PipelineError('Checkpoint source release failed verification')
     atomic_json(folder/'checkpoint_config.json',cfg)
     manifest['files']['checkpoint_config.json']={'sha256':file_hash(folder/'checkpoint_config.json')}
+    from .lean_recovery import enabled, recovery_bindings
+    lean=enabled(cfg)
+    object_root=Path(cfg['state_dir'])/'artifact_objects' if lean else None
+    if lean:
+        manifest['recovery_bindings']=recovery_bindings(cfg,assets)
     for name,p in assets.items():
         relative=Path(name)
+        archive_name=name+'.gz' if relative.parts[0]=='releases' and p.suffix=='.jsonl' else name
+        old_entry=old_manifest.get('files',{}).get(archive_name) if lean and old_manifest else None
+        if old_entry and old_manifest.get('input_assets',{}).get(name)==asset_hashes[name]:
+            from .artifacts import copy_object
+            copy_object(previous/archive_name,folder/archive_name)
+            manifest['files'][archive_name]=dict(old_entry)
+            continue
         if relative.parts[0]=='releases' and p.suffix=='.jsonl':
             target=folder/relative.with_name(relative.name+'.gz');secure_directory(target.parent)
             h=_gzip(p,target);manifest['files'][str(target.relative_to(folder))]={
                 'sha256':file_hash(target),'gzip':True,'uncompressed_sha256':h,'restore_path':name}
         else:
-            _add_asset(folder,manifest,p,relative)
+            _add_asset(folder,manifest,p,relative,object_root)
             h=manifest['files'][name]['sha256']
         if h!=asset_hashes[name]:raise PipelineError('Checkpoint asset changed after freshness check')
     # Administrative overlay is rebuilt from the same frozen main snapshot.
     present=main.execute("SELECT 1 FROM sqlite_master WHERE name='dyad_registry'").fetchone()
-    if present:
+    if present and lean and old_manifest and old_manifest['source_hashes'].get('study2.sqlite')==manifest['source_hashes'].get('study2.sqlite') and all('recovered_tracking/'+n in old_manifest['files'] for n in ('tracking.json.gz','manifest.json')):
+        from .artifacts import copy_object
+        for name in ('tracking.json.gz','manifest.json'):
+            relative='recovered_tracking/'+name
+            copy_object(previous/relative,folder/relative)
+            manifest['files'][relative]=dict(old_manifest['files'][relative])
+    elif present:
         data={t:[dict(row) for row in main.execute('SELECT * FROM '+t+' ORDER BY 1')] for t in TABLES}
         from .common import digest
         secure_directory(folder/'recovered_tracking')
@@ -225,13 +269,17 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                     archive=temporary/(name+'.gz');h=_gzip(plain,archive);plain.unlink()
                     manifest['files'][archive.name]={'sha256':file_hash(archive),'gzip':True,
                                 'uncompressed_sha256':h,'restore_path':name}
-                _capture_assets(temporary,manifest,cfg,sources['study2.sqlite'],assets,asset_hashes)
+                _capture_assets(temporary,manifest,cfg,sources['study2.sqlite'],assets,asset_hashes,previous,old_manifest)
                 _,current_assets=_asset_inventory(cfg,sources['study2.sqlite'])
                 if {name:file_hash(p) for name,p in current_assets.items()}!=asset_hashes:
                     raise PipelineError('Checkpoint asset inventory changed during capture')
                 if config_override:
                     atomic_json(temporary/'checkpoint_config.json',config_override)
                     manifest['files']['checkpoint_config.json']['sha256']=file_hash(temporary/'checkpoint_config.json')
+                from .lean_recovery import enabled
+                if enabled(cfg) and old_manifest:
+                    manifest['previous_verified_checkpoint']={'path':str(previous),'checkpoint_id':old_manifest['checkpoint_id'],
+                        'manifest_sha256':file_hash(previous/'manifest.json')}
                 atomic_json(temporary/'manifest.json',manifest)
                 atomic_json(temporary/'manifest.sha256.json',{'manifest.json':file_hash(temporary/'manifest.json')})
                 with tempfile.TemporaryDirectory(prefix='study2-checkpoint-proof-') as temp:
@@ -249,6 +297,12 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
 
 def _finish_retention(cfg,final):
     """Promote the ledger before pruning; retry unfinished cleanup on reuse."""
+    from .lean_recovery import enabled, retention_plan
+    if enabled(cfg):
+        manifest=checkpoint_manifest(final)
+        previous=manifest.get('previous_verified_checkpoint',{}).get('path')
+        atomic_json(Path(cfg['state_dir'])/'CHECKPOINT_RETENTION_PLAN.json',retention_plan(cfg,final,previous))
+        return
     if not cfg.get('checkpoint_policy',{}).get('latest_complete_only'):
         return
     state=Path(cfg['state_dir']);final=Path(final)

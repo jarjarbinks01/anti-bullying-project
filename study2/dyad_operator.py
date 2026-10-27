@@ -121,13 +121,26 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
     Callers hold the main writer lock.
     """
     from .review_core import backup_workspace
+    from .lean_recovery import enabled
+    data = workspace_snapshot(db)
+    tracking_hash = digest(data)
+    review = backup_workspace(cfg, 'dyad_' + reason)
+    review_hash = file_hash(Path(review)) if review else None
+    pointer = Path(cfg['state_dir']) / 'DYAD_LEDGER.json'
+    if enabled(cfg) and pointer.is_file():
+        prior = json.loads(pointer.read_text())
+        # Verify the old immutable bundle before reuse; a corrupt recovery copy
+        # must never be silently accepted merely because its index matches.
+        saved, _ = verify_bundle(prior['bundle'])
+        if prior['hash'] != saved['tracking_hash']:
+            raise PipelineError('Administrative recovery index mismatch')
+        if saved['tracking_hash'] == tracking_hash and saved['files'].get('review.sqlite') == review_hash:
+            return prior['bundle']
     folder = Path(cfg['state_dir']) / 'dyad_backups' / ('bundle_' + uuid.uuid4().hex)
     secure_directory(folder)
-    data = workspace_snapshot(db)
     ledger = folder / 'tracking.json'
     atomic_json(ledger, {'schema_version': dyads.SCHEMA_VERSION, 'tables': data})
     ledger.chmod(0o600)
-    review = backup_workspace(cfg, 'dyad_' + reason)
     if review:
         # Both paths are immutable snapshots. Share their storage without
         # linking the live workspace; deleting either path keeps the other.
@@ -139,7 +152,7 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
     release = current(db)
     manifest = {'at': utcnow(), 'reason': reason, 'release_id': release['release_id'] if release else None,
                 'files': {p.name: file_hash(p) for p in folder.iterdir() if p.is_file()},
-                'tracking_hash': digest(data), 'schema_version': dyads.SCHEMA_VERSION}
+                'tracking_hash': tracking_hash, 'schema_version': dyads.SCHEMA_VERSION}
     atomic_json(folder / 'manifest.json', manifest)
     (folder / 'manifest.json').chmod(0o600)
     # Last-known administrative history is kept outside release rollback.
@@ -181,20 +194,19 @@ def recovery_check(db, cfg):
     if not pointer.exists():
         return
     p = json.loads(pointer.read_text())
-    _, data = verify_bundle(p['bundle'])
-    if p['hash'] != digest(data):
+    verified, data = verify_bundle(p['bundle'])
+    if p['hash'] != verified['tracking_hash']:
         raise PipelineError('登記歷史索引不一致，必須先核對還原')
     if not data:
         return
     if not dyads.exists(db):
         raise PipelineError('還原的主資料庫缺少已保存的永久登記，必須先還原追蹤備份')
-    actual = workspace_snapshot(db)
     # Never drop issued IDs or invitation/adjudication events when restoring an
     # older research database. Extra newer live rows are safe, missing rows are not.
     keys = {'dyad_registry': 'dyad_id', 'dyad_invitation_events': 'operation_id',
             'dyad_resolutions': 'operation_id', 'dyad_events': 'event_id'}
     for table, key in keys.items():
-        current_rows = {r[key]: r for r in actual[table]}
+        current_rows = {r[key]: dict(r) for r in db.execute('SELECT * FROM ' + table)}
         for row in data[table]:
             if row[key] not in current_rows:
                 raise PipelineError('還原的資料庫遺漏永久登記或行政歷史，必須核對及還原追蹤備份')

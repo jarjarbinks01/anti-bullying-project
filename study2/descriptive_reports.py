@@ -11,7 +11,7 @@ from .descriptive_data import demographic_values
 from .descriptive_spec import (DICTIONARY_VERSION, GROUPS, MODES, REPORT_FILES, REPORT_RANGES, VERSION,
                                dictionary_rows, variables)
 from .descriptives import (cohort, filter_cohort, formatted, paired_changes, statistics,
-                           validate_statistics, wave_counts)
+                           validate_statistics, wave_counts, prepare_report_cohorts)
 
 NOTES = [
     ('計分', '重用本版共用量表分數；所需題目完整才計分；SEC 已轉為 1–4；PHQ 加總，其餘沿用共用平均。'),
@@ -170,44 +170,54 @@ def workbook_bytes(stats, changes, mode, release_id):
     return stream.getvalue()
 
 
-def write_reports(folder, measurements, frame, parents, release_id):
+def write_reports(folder, measurements, frame, parents, release_id, *, formatted=True, prepared=None):
     """Finish every required report before the runner may validate the release."""
     all_stats, all_changes, counts = [], [], {}
-    target = Path(folder)/'4.1_descriptive'; secure_directory(target)
+    target = Path(folder)/'4.1_descriptive'
+    if formatted:
+        secure_directory(target)
     for mode, filename in REPORT_FILES.items():
         mode_stats, mode_changes = [], []
         counts[mode] = {}
         for role in ('student', 'parent'):
-            unfiltered = cohort(frame, parents, measurements, mode, role)
-            selected, _ = filter_cohort(unfiltered)
-            selected.attrs['mode'] = mode
+            if prepared is None:
+                unfiltered = cohort(frame, parents, measurements, mode, role)
+                selected, _ = filter_cohort(unfiltered)
+                selected.attrs['mode'] = mode
+            else:
+                unfiltered, selected = prepared[mode, role]
             counts[mode][role] = {'all_schools': wave_counts(unfiltered), 'mainstream': wave_counts(selected)}
             mode_stats.append(statistics(selected, role, GROUPS, release_id))
             mode_changes.append(paired_changes(selected, role, GROUPS, release_id))
         stats = pd.concat(mode_stats, ignore_index=True)
         changes = pd.concat(mode_changes, ignore_index=True)
         validate_statistics(stats)
-        data = workbook_bytes(stats, changes, mode, release_id)
-        path = target/filename; temporary = target/(filename+'.partial')
-        try:
-            with temporary.open('wb') as handle:
-                temporary.chmod(0o600); handle.write(data); handle.flush(); os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        if formatted:
+            data = workbook_bytes(stats, changes, mode, release_id)
+            path = target/filename; temporary = target/(filename+'.partial')
+            try:
+                with temporary.open('wb') as handle:
+                    temporary.chmod(0o600); handle.write(data); handle.flush(); os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         all_stats.append(stats); all_changes.append(changes)
     combined = pd.concat(all_stats, ignore_index=True)
     combined.to_parquet(Path(folder)/'descriptive_statistics.parquet', index=False)
     changes = pd.concat(all_changes, ignore_index=True)
     changes.to_parquet(Path(folder)/'descriptive_changes.parquet', index=False)
     result = dict(version=VERSION, dictionary_version=DICTIONARY_VERSION, statistics_rows=len(combined),
-                  counts=counts, reports={name: file_hash(target/name) for name in REPORT_FILES.values()})
+                  counts=counts, reports={name: file_hash(target/name) for name in REPORT_FILES.values()} if formatted else {},
+                  formatted_reports={'status': 'written' if formatted else 'deferred',
+                                     'files': list(REPORT_FILES.values())},
+                  numeric_hashes={name: file_hash(Path(folder)/name) for name in
+                                 ('descriptive_statistics.parquet', 'descriptive_changes.parquet')})
     atomic_json(Path(folder)/'descriptive_manifest.json', result)
     verify_reports(folder, result)
     return result
 
 
-def prepare_reports(folder, by_id, scored_ids, analysis_row, caregivers=()):
+def prepare_reports(folder, by_id, scored_ids, analysis_row, caregivers=(), *, formatted=True):
     measurements = pd.DataFrame([demographic_values(by_id[sid], analysis_row(by_id[sid])) for sid in sorted(scored_ids)])
     if measurements.empty:
         measurements = pd.DataFrame(columns=['submission_id', 'descriptive_dictionary_version', 'school_stage'])
@@ -220,9 +230,12 @@ def prepare_reports(folder, by_id, scored_ids, analysis_row, caregivers=()):
     frame = pd.read_parquet(Path(folder)/'analysis.parquet')
     parent_path = Path(folder)/'parent_longitudinal.parquet'
     parents = pd.read_parquet(parent_path) if parent_path.exists() else None
-    result = write_reports(folder, measurements, frame, parents, Path(folder).name)
+    prepared = prepare_report_cohorts(frame, parents, measurements)
+    result = write_reports(folder, measurements, frame, parents, Path(folder).name,
+                           formatted=formatted, prepared=prepared)
     from .descriptive_exploration_outputs import write_exploration
-    result['exploration'] = write_exploration(folder, measurements, frame, parents, Path(folder).name)
+    result['exploration'] = write_exploration(folder, measurements, frame, parents, Path(folder).name,
+                                             prepared=prepared)
     return result
 
 
@@ -235,8 +248,105 @@ def verify_reports(folder, details):
     for name, expected in details['reports'].items():
         if file_hash(folder/'4.1_descriptive'/name) != expected:
             raise PipelineError('Descriptive workbook fingerprint mismatch')
-    if set(details['reports']) != set(REPORT_FILES.values()):
+    contract = details.get('formatted_reports')
+    deferred = contract is not None and contract.get('status') == 'deferred'
+    if contract is not None:
+        if (set(contract) != {'status', 'files'} or contract['status'] not in {'written', 'deferred'}
+                or contract['files'] != list(REPORT_FILES.values())):
+            raise PipelineError('Invalid formatted report output contract')
+        pins = details.get('numeric_hashes', {})
+        if set(pins) != {'descriptive_statistics.parquet', 'descriptive_changes.parquet'}:
+            raise PipelineError('Formatted reports require pinned numeric inputs')
+        for name, expected in pins.items():
+            if file_hash(folder/name) != expected:
+                raise PipelineError('Formatted report numeric input fingerprint mismatch')
+    if deferred and details['reports']:
+        raise PipelineError('Deferred workbooks must not be declared as written')
+    if not deferred and set(details['reports']) != set(REPORT_FILES.values()):
         raise PipelineError('A required 4.1 workbook is missing')
     if details.get('exploration'):
         from .descriptive_exploration_outputs import verify_exploration
         verify_exploration(folder, details['exploration'])
+
+
+def _reference_inputs(folder):
+    folder = Path(folder)
+    details = json.loads((folder/'descriptive_manifest.json').read_text())
+    if details.get('version') != VERSION or details.get('dictionary_version') != DICTIONARY_VERSION:
+        raise PipelineError('Use the report renderer frozen with this publication')
+    verify_reports(folder, details)
+    pins = details.get('numeric_hashes')
+    if not pins:
+        return details, None, None
+    stats = pd.read_parquet(folder/'descriptive_statistics.parquet')
+    changes = pd.read_parquet(folder/'descriptive_changes.parquet')
+    for table in (stats, changes):
+        if not table.empty and not table['release_id'].eq(folder.name).all():
+            raise PipelineError('Numeric report belongs to another release')
+    return details, stats, changes
+
+
+def _reference_books(folder, modes):
+    folder = Path(folder)
+    if set(modes) - set(REPORT_FILES):
+        raise PipelineError('Unknown descriptive report mode')
+    details, stats, changes = _reference_inputs(folder)
+    if stats is None:
+        return {mode: (folder/'4.1_descriptive'/REPORT_FILES[mode]).read_bytes() for mode in modes}
+    books = {mode: workbook_bytes(stats[stats['mode'].eq(mode)], changes[changes['mode'].eq(mode)],
+                                  mode, folder.name) for mode in modes}
+    if any(file_hash(folder/name) != expected for name, expected in details['numeric_hashes'].items()):
+        raise PipelineError('Numeric report inputs changed during rendering')
+    return books
+
+
+def reference_workbook(folder, mode):
+    """Render canonical OFF/reference values; no scoring or publication write."""
+    return _reference_books(folder, [mode])[mode]
+
+
+def export_reference_reports(folder, destination):
+    """Create a separate new directory; never add files to a frozen release."""
+    folder, destination = Path(folder).resolve(), Path(destination).absolute()
+    if destination.is_symlink() or destination.exists():
+        raise PipelineError('Report destination must be a new directory')
+    destination = destination.resolve()
+    if destination == folder or folder in destination.parents or destination in folder.parents:
+        raise PipelineError('Report destination must be separate from the frozen release')
+    # Render/verify before creating any output. The destination is exclusive.
+    books = {REPORT_FILES[mode]: data for mode, data in _reference_books(folder, REPORT_FILES).items()}
+    destination.mkdir(mode=0o700)
+    for name, data in books.items():
+        with (destination/name).open('xb') as handle:
+            (destination/name).chmod(0o600)
+            handle.write(data)
+    result = {'release_id': folder.name, 'membership': 'canonical_OFF_reference',
+              'report_version': VERSION, 'files': {name: file_hash(destination/name) for name in books}}
+    atomic_json(destination/'REPORT_EXPORT.json', result)
+    return result
+
+
+def render_reference_downloads(st, folder, summary, *, exclusions_on=False):
+    """Prepare deferred downloads only on request, preserving OFF-only labeling."""
+    if exclusions_on:
+        st.info('Original OFF/reference workbooks are disabled while ON is requested. Use the current filtered analysis downloads, or select OFF.')
+        return
+    deferred = summary['descriptive'].get('formatted_reports', {}).get('status') == 'deferred'
+    for mode, name in REPORT_FILES.items():
+        if deferred:
+            if not st.button('Prepare ' + MODES[mode], key='ds_prepare_' + mode):
+                continue
+            data = reference_workbook(folder, mode)
+        else:
+            data = (Path(folder)/'4.1_descriptive'/name).read_bytes()
+        st.download_button(MODES[mode], data, 'OFF-reference-' + name,
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key='ds_report_' + mode)
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Render four OFF/reference workbooks without recalculation')
+    parser.add_argument('--release', required=True, type=Path)
+    parser.add_argument('--output', required=True, type=Path)
+    args = parser.parse_args()
+    print(json.dumps(export_reference_reports(args.release, args.output), ensure_ascii=False, indent=2))

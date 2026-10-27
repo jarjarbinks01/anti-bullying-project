@@ -19,6 +19,22 @@ def wave_counts(rows):
     return {w: int(rows['wave'].eq(w).sum()) for w in ('T0', 'T1')}
 
 
+def prepare_report_cohorts(frame, parents, measurements):
+    """Operation-local shared report inputs; never cached across data revisions.
+
+    Consumers treat both frames as read-only. Selection is the existing default
+    mainstream selection; other filter settings require their own preparation.
+    """
+    prepared = {}
+    for mode in MODES:
+        for role in ('student', 'parent'):
+            base = cohort(frame, parents, measurements, mode, role)
+            selected, _ = filter_cohort(base)
+            selected.attrs['mode'] = mode
+            prepared[mode, role] = (base, selected)
+    return prepared
+
+
 def _anchor_rows(rows, anchors, keys):
     names = {name: 'anchor_' + name for name in ANCHOR_FIELDS}
     if anchors.duplicated(keys).any():
