@@ -7,7 +7,9 @@ exports retain small aggregate cells; identifiers and raw answers stay local.
 from __future__ import annotations
 
 import argparse
+import base64
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -37,7 +39,7 @@ from .static_sources import (CODES as SOURCE_CODES, build_pairs as source_pairs,
                              header as source_header, source_code, validate_sources)
 
 FORMAT = 'study2_static_v1'
-DEPLOY_FILES = {'index.html', 'app.js', 'styles.css', 'snapshot.js', 'vercel.json',
+DEPLOY_FILES = {'index.html', 'app.js', 'styles.css', 'snapshot.js', 'vercel.json', 'bootstrap-on.js',
                 'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js',
                 '.vercelignore', 'snapshot-manifest.json', *ACCESS_FILES, *PERIOD_FILES}
 SCOPE_EXPORT_FORMAT = 'study2_static_scope_export_v1'
@@ -726,6 +728,47 @@ def _owned_deployment(destination):
     return True
 
 
+def _sri(content):
+    """Bind a script's exact UTF-8 bytes to the generated same-origin HTML."""
+    return 'sha384-' + base64.b64encode(hashlib.sha384(content.encode('utf-8')).digest()).decode('ascii')
+
+
+def _lazy_bootstrap(packed_snapshot, scope_export, manual_exclusion, scripts):
+    """Derive the first-page subset only from a fully validated ON/OFF export.
+
+    The original complete artifacts remain available, with their byte and typed
+    digests pinned, and the original full runtime validator gates later views.
+    """
+    if (not manual_exclusion or manual_exclusion.get('status') != 'available' or
+            packed_snapshot.get('release_context', {}).get('default_eligibility') != 'on'):
+        return None
+    def metadata(value):
+        return {**value, 'views': []}
+    return dict(format='study2_lazy_bootstrap_v1', release_id=packed_snapshot['release_id'],
+                revision=manual_exclusion['revision'], inventory_revision=manual_exclusion['inventory_revision'],
+                policy=manual_exclusion['policy'],
+                off=dict(snapshot=metadata(packed_snapshot), scope_export=scope_export),
+                on=dict(snapshot=metadata(manual_exclusion['on']['snapshot']),
+                        scope_export=manual_exclusion['on']['scope_export']),
+                impact=manual_exclusion['impact'],
+                bindings=dict(off_snapshot_revision=manual_exclusion['off']['snapshot_revision'],
+                              off_scope_revision=manual_exclusion['off']['scope_revision'],
+                              on_revision=manual_exclusion['on_revision'],
+                              scripts={name: scripts[name] for name in
+                                       ('snapshot.js', 'scope-index.js', 'manual-exclusion.js')}))
+
+
+def _lazy_index(html, boot_script):
+    required = ('<script defer src="snapshot.js"></script>',
+                '<script defer src="scope-index.js"></script>',
+                '<script defer src="manual-exclusion.js"></script>')
+    if any(html.count(tag) != 1 for tag in required):
+        raise PipelineError('Unexpected dashboard script layout; lazy export stopped.')
+    return (html.replace(required[0], '<script defer src="bootstrap-on.js" integrity="' +
+                         _sri(boot_script) + '"></script>')
+            .replace(required[1], '').replace(required[2], ''))
+
+
 def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=None,
                verify_inputs=None, input_inventory=None, period_assets=None):
     from .static_assets import APP_JS, HTML, STYLES
@@ -764,13 +807,15 @@ def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=Non
     try:
         html = HTML if 'src="manual-exclusion.js"' in HTML else HTML.replace(
             '<script defer src="app.js">', '<script defer src="manual-exclusion.js"></script><script defer src="app.js">')
+        packed_snapshot = plain(pack_snapshot(snapshot))
         contents = {**ACCESS_FILES, **period_assets, 'index.html': html, 'app.js': APP_JS, 'styles.css': STYLES,
-                    'snapshot.js': 'window.STUDY2_SNAPSHOT=' + json.dumps(plain(pack_snapshot(snapshot)), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
+                    'snapshot.js': 'window.STUDY2_SNAPSHOT=' + json.dumps(packed_snapshot, ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-index.js': 'window.STUDY2_SCOPE_EXPORT=' + json.dumps(plain(scope_export), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-engine.js': SCOPE_JS, 'quality-ui.js': QUALITY_JS,
                     'manual-exclusion.js': JS_HASH + '\nwindow.STUDY2_MANUAL_EXCLUSION=' + json.dumps(
                         plain(manual_exclusion), ensure_ascii=False, separators=(',', ':'),
                         allow_nan=False).replace('<', '\\u003c') + ';\n',
+                    'bootstrap-on.js': 'window.STUDY2_LAZY_BOOTSTRAP=null;\n',
                     '.vercelignore': '*\n' + ''.join('!' + name + '\n' for name in sorted(
                         (DEPLOY_FILES - {'preview.mjs', 'DEPLOYMENT.md', '.vercelignore'}) | {'api', 'server'})),
                     'vercel.json': json.dumps({'framework': None, 'buildCommand': 'npm run build',
@@ -784,6 +829,16 @@ def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=Non
                             {'key': 'CDN-Cache-Control', 'value': 'no-store'},
                             {'key': 'Vercel-CDN-Cache-Control', 'value': 'no-store'},
                             {'key': 'Cross-Origin-Resource-Policy', 'value': 'same-origin'}]}]}, indent=2)}
+        boot = None
+        if (manual_exclusion and manual_exclusion.get('status') == 'available' and
+                packed_snapshot.get('release_context', {}).get('default_eligibility') == 'on'):
+            script_pins = {name: _sri(contents[name]) for name in
+                           ('snapshot.js', 'scope-index.js', 'manual-exclusion.js')}
+            boot = _lazy_bootstrap(packed_snapshot, scope_export, manual_exclusion, script_pins)
+        if boot is not None:
+            contents['bootstrap-on.js'] = 'window.STUDY2_LAZY_BOOTSTRAP=' + json.dumps(
+                plain(boot), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n'
+            contents['index.html'] = _lazy_index(html, contents['bootstrap-on.js'])
         for name, content in contents.items():
             (stage / name).parent.mkdir(parents=True, exist_ok=True)
             (stage / name).write_text(content, encoding='utf-8')

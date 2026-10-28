@@ -43,7 +43,7 @@ const signedRequest=(token,path='/snapshot.js')=>request(path,{headers:{cookie:'
     return result.stdout
 
 
-@pytest.mark.parametrize('path',['/','/index.html','/app.js','/snapshot.js','/snapshot-manifest.json',
+@pytest.mark.parametrize('path',['/','/index.html','/app.js','/snapshot.js','/bootstrap-on.js','/snapshot-manifest.json',
     '/scope-index.js','/scope-engine.js','/quality-ui.js',
     '/any-future-data.json','/server/access-core.js','/login.html/','/%2flogin.html'])
 def test_every_nonpublic_route_blocks_unauthenticated_content(site,path):
