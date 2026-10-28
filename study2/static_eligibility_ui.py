@@ -189,6 +189,51 @@ const Study2ManualEligibility=(()=>{
       get mode(){return mode;},get bundle(){return active;},metadata,quality,
       select(requested){need(['off','on'].includes(requested),'manual_mode_invalid');mode=requested;active=requested==='off'?off:available?on:null;need(active,'manual_requested_on_unavailable');return active;}});
   }
-  return Object.freeze({create,digest,canonical});
+  // The small initial bundle is generated only after the complete native
+  // export has passed validate_manual_export. Its exact bytes are pinned by
+  // the same-origin HTML's SRI, and only the first-tab data is usable here.
+  // OFF and all other tabs still require the complete existing validator.
+  function createBootstrap(boot,engine){
+    need(keys(boot,['format','release_id','revision','inventory_revision','policy','off','on','impact','bindings']), 'bootstrap_shape');
+    need(boot.format==='study2_lazy_bootstrap_v1'&&boot.policy===POLICY&&hash(boot.revision)&&hash(boot.inventory_revision),'bootstrap_metadata');
+    need(keys(boot.off,['snapshot','scope_export'])&&keys(boot.on,['snapshot','scope_export']),'bootstrap_shape');
+    const off=boot.off,on=boot.on,original=off.snapshot,active=on.snapshot;
+    need(original.release_id===boot.release_id&&active.release_id===boot.release_id&&
+      original.release_context?.release_id===boot.release_id&&original.release_context?.default_eligibility==='on'&&
+      original.release_context?.flags?.manifest_revision===boot.revision,'bootstrap_release_mismatch');
+    need(Array.isArray(original.views)&&!original.views.length&&Array.isArray(active.views)&&!active.views.length,'bootstrap_views_forbidden');
+    need(keys(boot.bindings,['off_snapshot_revision','off_scope_revision','on_revision','scripts'])&&
+      [boot.bindings.off_snapshot_revision,boot.bindings.off_scope_revision,boot.bindings.on_revision].every(hash)&&
+      keys(boot.bindings.scripts,['snapshot.js','scope-index.js','manual-exclusion.js'])&&
+      Object.values(boot.bindings.scripts).every(s=>typeof s==='string'&&/^sha384-[A-Za-z0-9+/]{64}$/.test(s)), 'bootstrap_bindings');
+    impact(boot.impact);validateSnapshots(original,active,boot);
+    scopeExport(off.scope_export,boot.release_id,engine);scopeExport(on.scope_export,boot.release_id,engine);
+    const baseline=engine.query(off.scope_export.index),selected=engine.query(on.scope_export.index),e=selected.eligibility;
+    need(e&&e.mode==='on'&&e.revision===boot.revision&&e.inventory_revision===boot.inventory_revision,'manual_scope_revision_mismatch');
+    need(canonical(baseline.raw)===canonical(selected.raw)&&canonical(baseline.flow)===canonical(selected.flow),'manual_history_mismatch');
+    need(canonical(e.intake)===canonical(boot.impact.intake)&&canonical(e.samples)===canonical(boot.impact.samples),'manual_impact_mismatch');
+    agreeSamples(boot.impact.samples,selected);
+    for(const row of boot.impact.samples){const s=baseline.samples.find(r=>r.code===row.code);
+      need(s&&(s.status==='available'?s.count===row.baseline:row.baseline===null),'manual_impact_mismatch');
+      if(row.baseline!==null)need(original.counts?.[row.code]===row.baseline&&active.counts?.[row.code]===row.active,'manual_count_mismatch');}
+    if(boot.impact.independent!==null)for(const [key,row] of Object.entries(boot.impact.independent))
+      need(original.independent_counts?.[key]===row.baseline&&active.independent_counts?.[key]===row.active,'manual_independent_count_mismatch');
+    freeze(boot);
+    function metadata(){return Object.freeze({eligibility_mode:'on',eligibility_revision:boot.revision,
+      eligibility_inventory_revision:boot.inventory_revision,eligibility_release_id:boot.release_id,
+      eligibility_policy:POLICY,eligibility_status:'available'});}
+    function quality(result){
+      const current=result.eligibility;need(current&&current.mode==='on'&&current.revision===boot.revision&&
+        current.inventory_revision===boot.inventory_revision,'manual_scope_revision_mismatch');
+      const before=engine.query(off.scope_export.index,result.scope);need(canonical(result.raw)===canonical(before.raw),'manual_history_mismatch');
+      need(Array.isArray(current.samples)&&current.samples.length===9);agreeSamples(current.samples,result);
+      for(const row of current.samples){summary(row,true);const s=before.samples.find(s=>s.code===row.code);need(s&&s.count===row.baseline,'manual_impact_mismatch');}
+      return {format:'study2_manual_exclusion_ui_v1',mode:'on',revision:boot.revision,inventory_revision:boot.inventory_revision,
+        release_id:boot.release_id,policy:POLICY,status:'available',code:null,intake:current.intake,samples:current.samples};
+    }
+    return Object.freeze({configured:true,available:true,reason:null,mode:'on',bundle:on,metadata,quality,
+      select(requested){need(requested==='on','bootstrap_full_required');return on;}});
+  }
+  return Object.freeze({create,createBootstrap,digest,canonical});
 })();
 '''

@@ -8,7 +8,7 @@ import json
 from .static_period_assets import PERIOD_FILES
 
 PUBLIC_FILES = ('index.html', 'app.js', 'styles.css', 'snapshot.js',
-                'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js',
+                'scope-index.js', 'scope-engine.js', 'quality-ui.js', 'manual-exclusion.js', 'bootstrap-on.js',
                 'snapshot-manifest.json', 'login.html', 'login.css', 'login.js', 'access.js', *PERIOD_FILES)
 
 ACCESS_CORE = r'''
@@ -231,7 +231,7 @@ ACCESS_JS = r'''
 (() => {
   if(!['http:','https:'].includes(location.protocol))return;
   const button=document.querySelector('#sign-out');if(!button)return;button.hidden=false;
-  function leave(){document.querySelector('#content')?.replaceChildren();delete window.STUDY2_SNAPSHOT;delete window.STUDY2_SCOPE_EXPORT;location.replace('/login.html');}
+  function leave(){document.querySelector('#content')?.replaceChildren();delete window.STUDY2_SNAPSHOT;delete window.STUDY2_SCOPE_EXPORT;delete window.STUDY2_MANUAL_EXCLUSION;delete window.STUDY2_LAZY_BOOTSTRAP;location.replace('/login.html');}
   async function check(){try{const response=await fetch('/api/auth',{credentials:'same-origin',cache:'no-store'});const state=await response.json();if(!response.ok||!state.authenticated)leave();}catch{/* An offline page already received by an authorised browser is not a new grant. */}}
   button.onclick=async()=>{
     button.disabled=true;
