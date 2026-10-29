@@ -71,10 +71,29 @@ def cohort(frame, parent_frame, measurements, mode, role):
                          & frame['longitudinal_dyad'].fillna(False)].copy()
         students = attach_measurements(students, measurements)
         result = _anchor_rows(rows, students, ['child_id'])
-    # Only the dedicated confirmed-adult artifact establishes BD continuity.
-    # The ordinary parent fallback establishes child identity only.
-    result['adult_continuity_confirmed'] = bool(
-        role == 'parent' and mode == 'acbd' and parent_frame is not None)
+    # Historical formal BD artifacts contain confirmed same-adult pairs.
+    # A selected-B/D artifact instead carries explicit pair-level evidence:
+    # its same-child membership alone cannot establish adult continuity.
+    if role == 'parent' and mode == 'acbd' and parent_frame is not None:
+        from .bd_pairing import POLICY as CHILD_BD_POLICY, STATUSES as ADULT_STATUSES
+        metadata = {'bd_pairing_policy', 'bd_adult_status', 'bd_adult_rule', 'adult_continuity_confirmed'}
+        present = metadata & set(parent_frame.columns)
+        # Some historical input frames already have a generic continuity
+        # boolean. Only BD-specific metadata identifies the new artifact.
+        if present & {'bd_pairing_policy', 'bd_adult_status', 'bd_adult_rule'}:
+            if present != metadata or not result['bd_pairing_policy'].eq(CHILD_BD_POLICY).all() or \
+                    not result['bd_adult_status'].isin(ADULT_STATUSES).all() or \
+                    not result['bd_adult_rule'].map(lambda x: isinstance(x, str)).all() or \
+                    not result.loc[result['bd_adult_status'].ne('unconfirmed'), 'bd_adult_rule'].map(lambda x: bool(x.strip())).all() or \
+                    not result['adult_continuity_confirmed'].map(lambda x: isinstance(x, (bool, np.bool_))).all() or \
+                    not result['adult_continuity_confirmed'].eq(result['bd_adult_status'].eq('same')).all() or \
+                    result.groupby('child_id')[['bd_adult_status', 'bd_adult_rule']].nunique(dropna=False).gt(1).any().any():
+                raise PipelineError('BD adult-continuity evidence is incomplete or inconsistent')
+            result['adult_continuity_confirmed'] = result['adult_continuity_confirmed'].astype(bool)
+        else:
+            result['adult_continuity_confirmed'] = True
+    else:
+        result['adult_continuity_confirmed'] = False
     result['report_mode'] = mode
     result['grouping_anchor'] = ('該輪回應' if mode == 'abcd' else '該輪學生' if mode == 'ef'
                                  else '學生T0' if mode == 'efmatched' or role == 'student' else 'BD家長T0所指孩子')

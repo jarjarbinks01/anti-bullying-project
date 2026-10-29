@@ -130,7 +130,12 @@ def export_row(record: dict) -> dict:
 
 def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_queue: list[dict], schemas: dict,
                   adult_pairs: list[dict] | None = None, registration_rows: list[dict] | None = None,
-                  independent_parent_panel=None, panel_labels=None, *, formatted_reports=True) -> dict:
+                  independent_parent_panel=None, panel_labels=None, *, formatted_reports=True,
+                  bd_pairing_policy=None) -> dict:
+    from .bd_pairing import POLICY as CHILD_BD_POLICY, selected_pairs_with_case_evidence, selected_parent_rows
+    if bd_pairing_policy not in (None, CHILD_BD_POLICY):
+        raise ValueError('Unknown BD pairing policy')
+    child_bd = bd_pairing_policy == CHILD_BD_POLICY
     if independent_parent_panel is not None:
         # Output-only overlay: preserve validated independent-parent exceptions
         # for all report surfaces without changing source records or waves.
@@ -145,6 +150,18 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
     selected = [r for r in records if r["selected_wave"]]
     cells = {(r["child_id"], r["role"], r["selected_wave"]): r for r in selected}
     by_id = {r["submission_id"]: r for r in records}
+    child_pairs = None
+    if child_bd:
+        slots = pd.DataFrame([dict(child_id=r['child_id'], submission_id=r['submission_id'],
+                                   role=r['role'], wave=r['selected_wave']) for r in selected],
+                             columns=['child_id', 'submission_id', 'role', 'wave'])
+        tracking = pd.DataFrame(registration_rows or [], columns=['child_id', 'parent_t0_id',
+                                  'parent_t1_id', 'adult_status', 'adult_rule'])
+        child_pairs = selected_pairs_with_case_evidence(slots, tracking, cases)
+        # The legacy selector can identify alternative responses; it is never
+        # a membership source for the same-child policy.
+        adult_pairs = [dict(child_id=p.child_id, t0=p.t0, t1=p.t1, status=p.adult_status,
+                            rule=p.adult_rule) for p in child_pairs.itertuples(index=False)]
     bd_by_child = {p["child_id"]: p for p in adult_pairs or []}
     bd_ids = {p[w] for p in adult_pairs or [] for w in ["t0", "t1"]}
     scored_ids = {r["submission_id"] for r in selected} | bd_ids
@@ -208,15 +225,19 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
                 longitudinal.add((child, role))
                 def long_row(record, wave):
                     view = {**record, "selected_wave": wave}
-                    if role == "parent" and adult_pairs is not None:
+                    if role == "parent" and adult_pairs is not None and not child_bd:
                         view["wave_reason"] = "baseline_caregiver_latest_same_adult_followup" if wave == "T1" else record.get("wave_reason")
                     return export_row(view)
                 rows.append({"child_id": child,
-                             **({"respondent_id": pair["respondent_id"], "adult_match_rule": pair["rule"],
+                             **({"adult_status": pair["status"], "adult_match_rule": pair["rule"]}
+                                if role == "parent" and child_bd else
+                                {"respondent_id": pair["respondent_id"], "adult_match_rule": pair["rule"],
                                  "T1_family_selected_wave": b["selected_wave"]} if role == "parent" and adult_pairs is not None else {}),
                              **{"T0_" + k: v for k, v in long_row(a, "T0").items()}, **{"T1_" + k: v for k, v in long_row(b, "T1").items()}})
         columns = ["child_id"] + [w + "_" + k for w in ["T0", "T1"] for k in (["same_person_entry_id", "same_person_match_rule"] + schemas[role] + ["submission_id", "child_id", "source_claimed_timepoint", "final_timepoint", "wave_reason", "observed_at", "time_confidence"])]
-        if role == "parent" and adult_pairs is not None:
+        if role == "parent" and child_bd:
+            columns = ["child_id", "adult_status", "adult_match_rule"] + columns[1:]
+        elif role == "parent" and adult_pairs is not None:
             columns = ["child_id", "respondent_id", "adult_match_rule", "T1_family_selected_wave"] + columns[1:]
         columns += [w + "_" + k for w in ["T0", "T1"] for k in ["date_basis", "identity_rules", "adult_birth_year_status", "adult_identity_exception_type"]]
         columns += [w + '_' + k for w in ['T0','T1'] for k in PARENT_WAVE_FIELDS]
@@ -314,8 +335,12 @@ def write_outputs(folder: Path, records: list[dict], cases: list[dict], school_q
     analysis_columns += ['adult_birth_year_status', 'adult_identity_exception_type']
     pd.DataFrame(analysis, columns=analysis_columns).to_parquet(folder / "analysis.parquet", index=False)
     if adult_pairs is not None:
-        bd_analysis = [analysis_row(by_id[p[w]], wave) for p in adult_pairs for w, wave in [("t0", "T0"), ("t1", "T1")]]
-        pd.DataFrame(bd_analysis, columns=analysis_columns).to_parquet(folder / "parent_longitudinal.parquet", index=False)
+        if child_bd:
+            bd_frame = selected_parent_rows(pd.DataFrame(analysis, columns=analysis_columns), child_pairs)
+        else:
+            bd_analysis = [analysis_row(by_id[p[w]], wave) for p in adult_pairs for w, wave in [("t0", "T0"), ("t1", "T1")]]
+            bd_frame = pd.DataFrame(bd_analysis, columns=analysis_columns)
+        bd_frame.to_parquet(folder / "parent_longitudinal.parquet", index=False)
         summary["BD_alternative_followups"] = sum(by_id[p["t1"]]["selected_wave"] != "T1" for p in adult_pairs)
         summary["parent_child_longitudinal"] = sum((child, "parent", "T0") in cells and (child, "parent", "T1") in cells for child in {r["child_id"] for r in selected})
         summary["adult_case_status_counts"] = dict(Counter(c["status"] for c in cases if c["kind"] == "respondent"))

@@ -156,6 +156,13 @@ process.stdin.on('end',async()=>{
       if(check==='adult_unavailable'){
         assert(count('BD')==='Unavailable','BD unknown is not zero');assert(!host.textContent.includes('Same adult across waves'),'no invented adult continuity');expectDownload();
       }
+      if(check==='selected_child_bd'){
+        assert(count('BD')==='3','selected B/D count');
+        assert(host.textContent.includes('Same child across waves (BD)'),'selected B/D label');
+        assert(host.textContent.includes('Uses the selected parent B and D for the same child; the responding adult may differ.'),'selected B/D explanation');
+        assert(!host.textContent.includes('its follow-up can differ from D/F'),'no alternative follow-up claim');
+        expectDownload();
+      }
       if(check==='keyboard'){
         const target=host.querySelector('input[data-facet=sources]');target.focus();window.targetKey=target.dataset.key;
       }
@@ -206,6 +213,12 @@ def test_adult_continuity_unavailable_is_not_zero():
     index['samples']=[x for x in index['samples'] if x['code']!='BD']
     index['meta']['reconciliation']['status']='partial'
     run_browser(index, 'adult_unavailable')
+
+
+def test_selected_child_bd_uses_selected_waves_and_does_not_claim_same_adult():
+    from test_bd_scope_policy import inputs
+    records, frame, parents, summary = inputs()
+    run_browser(build_scope_index(records, frame, parents, summary), 'selected_child_bd')
 
 
 # R2 additions. All original 17 cases and their assertions above stay unchanged.

@@ -147,7 +147,14 @@ def _members(records, analysis, parents):
           'analysis_incomplete_membership')
     adult = {}
     if parents is not None:
+        from .bd_pairing import POLICY as CHILD_BD_POLICY
+        metadata = {'bd_pairing_policy', 'bd_adult_status', 'bd_adult_rule', 'adult_continuity_confirmed'}
+        present = metadata & set(parents.columns)
+        child_bd = 'bd_pairing_policy' in present
+        _need(not (present & {'bd_pairing_policy', 'bd_adult_status', 'bd_adult_rule'}) or present == metadata,
+              'formal_adult_metadata_incomplete')
         used = set()
+        continuity = {}
         for r in parents.to_dict('records'):
             key = r['child_id'], r['role'], r['wave']
             sid = r['submission_id']
@@ -158,12 +165,26 @@ def _members(records, analysis, parents):
                   'formal_adult_slot_mismatch')
             if 'version_id' in r:
                 _need(r['version_id'] == by_id[sid]['version_id'], 'formal_adult_version_mismatch')
+            if child_bd:
+                status, rule, confirmed = (r.get(k) for k in
+                    ('bd_adult_status', 'bd_adult_rule', 'adult_continuity_confirmed'))
+                _need(r.get('bd_pairing_policy') == CHILD_BD_POLICY and sid == slots.get(key) and
+                      status in {'same', 'different', 'unconfirmed'} and isinstance(rule, str) and
+                      (status == 'unconfirmed' or bool(rule.strip())) and type(confirmed) is bool and
+                      confirmed == (status == 'same'), 'child_bd_evidence_or_slot_mismatch')
+                _need(r['child_id'] not in continuity or continuity[r['child_id']] == (status, rule),
+                      'child_bd_evidence_inconsistent')
+                continuity[r['child_id']] = (status, rule)
             adult[key] = sid
             used.add(sid)
         for child in {k[0] for k in adult}:
             _need((child, 'parent', 'T0') in adult and (child, 'parent', 'T1') in adult and
                   adult[child, 'parent', 'T0'] == slots.get((child, 'parent', 'T0')),
                   'formal_adult_incomplete_pair')
+        if child_bd:
+            selected_pairs = {child for child, role, wave in slots if role == 'parent' and wave == 'T0'
+                              and (child, 'parent', 'T1') in slots}
+            _need({k[0] for k in adult} == selected_pairs, 'child_bd_incomplete_membership')
     members = {}
     for code, required in SLOTS.items():
         lookup = adult if code == 'BD' and parents is not None else slots

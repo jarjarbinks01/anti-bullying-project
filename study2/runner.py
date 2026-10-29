@@ -37,7 +37,7 @@ def fingerprint(cfg, manifest, db):
                    "dictionary": file_hash(Path(cfg["state_dir"]) / "school_dictionary.xlsx"),
                    "decisions": [d["payload"] for d in active_decisions(db)],
                    "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")],
-                   "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy"), cfg.get("parent_wave_policy")],
+                   "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy"), cfg.get("parent_wave_policy"), cfg.get("bd_pairing_policy")],
                    "formatted_descriptive_reports": cfg.get('output_policy', {}).get('formatted_descriptive_reports', 'eager'),
                    "source_folder": cfg.get("source_folder", "1.1_raw_file"), "source_registry": cfg["sources"],
                    "legacy_sources": {str(p.relative_to(cfg["project_root"])):file_hash(p) for p in legacy_files(cfg)},
@@ -65,6 +65,10 @@ def baseline_comparison(cfg, summary):
 
 
 def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
+    from .bd_pairing import POLICY as CHILD_BD_POLICY
+    bd_policy = cfg.get('bd_pairing_policy')
+    if bd_policy not in (None, CHILD_BD_POLICY):
+        raise PipelineError('Unknown BD pairing policy')
     report_policy = cfg.get('output_policy', {}).get('formatted_descriptive_reports', 'eager')
     if report_policy not in {'eager', 'on_demand'}:
         raise PipelineError('Unknown formatted descriptive report policy')
@@ -121,9 +125,17 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
                 check_unexpected_backfill(db, records)
                 cases += time_cases
                 adult_pairs = None
-                if cfg.get("bd_requires_same_adult"):
+                if cfg.get("bd_requires_same_adult") or bd_policy == CHILD_BD_POLICY:
                     from .respondents import adult_followups
-                    adult_pairs, adult_cases, adult_events = adult_followups(records, decisions, cfg["minimum_followup_days"], cfg.get("matching_policy", {}), parent_wave_policy=cfg.get("parent_wave_policy"))
+                    # Adult evidence remains useful, but its legacy selector may
+                    # annotate an alternative T1.  In the new BD policy it must
+                    # not mutate the established selected responses.
+                    if bd_policy == CHILD_BD_POLICY:
+                        import copy
+                        evidence_records = copy.deepcopy(records)
+                    else:
+                        evidence_records = records
+                    adult_pairs, adult_cases, adult_events = adult_followups(evidence_records, decisions, cfg["minimum_followup_days"], cfg.get("matching_policy", {}), parent_wave_policy=cfg.get("parent_wave_policy"))
                     cases += adult_cases
                     events += adult_events
                 from collections import defaultdict
@@ -156,7 +168,7 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             with artifact_cache(state/'artifact_objects',folder):
                 summary = write_outputs(folder, records, cases, school_queue, {"student": online.STUDENT_COLUMNS, "parent": online.PARENT_COLUMNS}, adult_pairs, dyad_rows,
                                         independent_parent_panel=parent_panel, panel_labels=panel_labels,
-                                        formatted_reports=report_policy == 'eager')
+                                        formatted_reports=report_policy == 'eager', bd_pairing_policy=bd_policy)
             summary["permanent_registration"] = dyads.validate_staging(db, run_id, records, cases, cfg)
             summary["manual_decisions_reopened"] = sum(e["status"] == "reopened" for e in events)
             summary["legacy_corrections_pending"] = sum(r["migration_status"].startswith("pending") for r in migration)
@@ -170,7 +182,9 @@ def run(cfg: dict, manifest: dict, publish=True, force=False) -> dict:
             summary["matching_policy"] = cfg.get("matching_policy", {})
             summary["date_policy"] = cfg.get("date_policy", "observed_dates_only")
             summary["parent_wave_policy"] = cfg.get("parent_wave_policy")
-            summary["bd_requires_same_adult"] = cfg.get("bd_requires_same_adult", False)
+            summary["bd_requires_same_adult"] = False if bd_policy == CHILD_BD_POLICY else cfg.get("bd_requires_same_adult", False)
+            if bd_policy == CHILD_BD_POLICY:
+                summary['bd_pairing_policy'] = bd_policy
             summary["t0_inferred_from_T1"] = sum(r["selected_wave"] == "T0" and r["claimed_wave"] == "T1" for r in records)
             summary["validation_cases_labelled"] = sum(r["reviewed"] for r in labels)
             summary["research_validation"] = "reviewed_sample" if labels else "not_yet_reviewed"

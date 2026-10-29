@@ -17,6 +17,7 @@
   "stale_after_days": 8,
   "date_policy": "current_creation_time_user_accepted_20261006",
   "bd_requires_same_adult": true,
+  "bd_pairing_policy": "selected_parent_waves_same_child_v1",
   "matching_policy": {
     "allow_one_digit_phone": true,
     "allow_school_transfer": true,

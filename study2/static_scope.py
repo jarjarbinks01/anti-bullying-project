@@ -40,6 +40,8 @@ REASONS = {
 STATUSES = {"eligible", "short_interval_followup", "extra_followup", *sum(
     (list(REASONS[s]) for s in STAGES[:3]), [])}
 ADULT_POLICY = "same_child_valid_equal_birth_year_any_exact_contact_relationship_informational"
+BD_CHILD_POLICY = "selected_parent_waves_same_child_v1"
+BD_CHILD_EVIDENCE = "selected_parent_longitudinal_artifact"
 MAX_COUNT = 2**53 - 1
 _KEY = re.compile(r"[a-z][a-z0-9_]*_[0-9a-f]{24}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
@@ -245,10 +247,16 @@ def _prepare(records, analysis, parent_longitudinal, summary, flow_evidence, sch
     adult = {"status": "unavailable", "policy": None, "evidence": None,
              "reason": "formal_adult_artifact_or_policy_missing"}
     adult_slots = {}
-    if parent_longitudinal is not None and summary.get("adult_identity_policy") == ADULT_POLICY:
-        adult = {"status": "available", "policy": ADULT_POLICY,
-                 "evidence": "formal_parent_longitudinal_artifact", "reason": None}
+    child_bd = summary.get("bd_pairing_policy") == BD_CHILD_POLICY
+    _need(summary.get("bd_pairing_policy") in {None, BD_CHILD_POLICY}, "unsupported_bd_pairing_policy")
+    if child_bd:
+        _need(summary.get("bd_requires_same_adult") is False and parent_longitudinal is not None,
+              "child_bd_policy_or_artifact_missing")
+    if parent_longitudinal is not None and (child_bd or summary.get("adult_identity_policy") == ADULT_POLICY):
+        adult = {"status": "available", "policy": BD_CHILD_POLICY if child_bd else ADULT_POLICY,
+                 "evidence": BD_CHILD_EVIDENCE if child_bd else "formal_parent_longitudinal_artifact", "reason": None}
         seen = set()
+        continuity = {}
         for row in _rows(parent_longitudinal):
             sid, child, role, wave = (row.get(k) for k in ("submission_id", "child_id", "role", "wave"))
             _need(sid in by_id and role == "parent" and wave in {"T0", "T1"}
@@ -258,6 +266,17 @@ def _prepare(records, analysis, parent_longitudinal, summary, flow_evidence, sch
                   and (record["status"] in {"eligible", "extra_followup", "short_interval_followup"}),
                   "formal_adult_record_mismatch")
             _need((child, role, wave) not in adult_slots and sid not in seen, "duplicate_formal_adult_slot")
+            if child_bd:
+                status, rule, confirmed = (row.get(k) for k in
+                    ("bd_adult_status", "bd_adult_rule", "adult_continuity_confirmed"))
+                _need(row.get("bd_pairing_policy") == BD_CHILD_POLICY and
+                      sid == slots.get((child, "parent", wave)) and
+                      status in {"same", "different", "unconfirmed"} and isinstance(rule, str) and
+                      (status == "unconfirmed" or bool(rule.strip())) and type(confirmed) is bool and
+                      confirmed == (status == "same"), "child_bd_evidence_or_slot_mismatch")
+                _need(child not in continuity or continuity[child] == (status, rule),
+                      "child_bd_evidence_inconsistent")
+                continuity[child] = (status, rule)
             adult_slots[child, role, wave] = sid
             seen.add(sid)
         for child in {k[0] for k in adult_slots}:
@@ -265,6 +284,10 @@ def _prepare(records, analysis, parent_longitudinal, summary, flow_evidence, sch
                   "incomplete_formal_adult_pair")
             _need(adult_slots[child, "parent", "T0"] == slots.get((child, "parent", "T0")),
                   "formal_adult_baseline_mismatch")
+        if child_bd:
+            selected_pairs = {child for child, role, wave in slots if role == "parent" and wave == "T0"
+                              and (child, "parent", "T1") in slots}
+            _need({key[0] for key in adult_slots} == selected_pairs, "child_bd_incomplete_membership")
 
     flow = dict(status="available", revision="terminal_projection_v1", reason=None)
     # A KEEP can overwrite an earlier exclusion. Terminal status cannot prove
@@ -396,7 +419,9 @@ def validate_index(index):
             _need(item["reason"] is None and item["policy" if feature == "adult" else "revision"] is not None,
                   "missing_feature_provenance")
         if feature == "adult" and item["status"] == "available":
-            _need(item["policy"] == ADULT_POLICY and item["evidence"] == "formal_parent_longitudinal_artifact",
+            _need((item["policy"], item["evidence"]) in {
+                    (ADULT_POLICY, "formal_parent_longitudinal_artifact"),
+                    (BD_CHILD_POLICY, BD_CHILD_EVIDENCE)},
                   "unsupported_adult_policy_or_evidence")
         if feature == "adult" and item["status"] == "unavailable":
             _need(item["evidence"] is None, "unavailable_adult_claims_evidence")
