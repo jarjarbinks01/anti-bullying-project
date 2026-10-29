@@ -47,7 +47,10 @@ def initialize(project: Path, config_path: Path, state: Path | None = None, sour
                                     "allow_contact_subgroups": True,
                                     "adult_contact_scope": "any_exact"},
                    parent_wave_policy="student_anchored_hk_nearest_v2",
-                   bd_requires_same_adult=True)
+                   # This legacy switch also controls parent repeat handling;
+                   # keep it stable while explicitly changing BD membership.
+                   bd_requires_same_adult=True,
+                   bd_pairing_policy="selected_parent_waves_same_child_v1")
     for role in ["student", "parent"]:
         for wave in ["T0", "T1"]:
             time = {("student", "T0"): "19.08", ("student", "T1"): "19.09",

@@ -262,7 +262,7 @@ with method:
         - **家長T1優先**：學生T1香港日期同日或之後的家長回應先列T1候選，選最新一份，包括原標T0的回應，不拿來填補T0。
         - **家長T0**：從其餘同一孩子的合資格回應中，按實際建立時間與學生T0的絕對差距選最近一份，可早於學生，不設硬上限；沒有學生T1時所有有可靠日期的家長回應均可作T0候選。等距候選留待核實。
         - **日期差**：保存家長減學生的香港曆日差及實際時間差；負數表示家長較早，正數表示家長較遲，未選回應仍可追查。
-        - **成人及重填**：家長自身沒有90日門檻，BD仍須同一成人。30日重填只在同一輪、同一成人內處理，保護已選最近基線，不跨T0／T1去重。
+        - **成人及重填**：家長自身沒有90日門檻。30日重填只在同一輪、同一成人內處理，保護已選最近基線，不跨T0／T1去重。
         - **資料缺口**：沒有學生基線則另列；只有家長T1而沒有T0可進F，不進BD／EF。原始提交、標籤、身份裁定及永久ID保留。
         ''')
     elif student_anchored:
@@ -271,7 +271,7 @@ with method:
         - **家長分輪**：按香港曆日。早於學生T0只列歷史；學生T0當日至學生T1前一日屬T0候選；學生T1同日或之後屬T1候選，原始標籤不作門檻。
         - **家長選取**：T0選最早候選（最接近學生基線），T1選最新候選。尚未有學生T1時，家長T0不設固定日期差上限。不設家長自身90日門檻。
         - **家長資料缺口**：未有學生基線則另列；有家長T1但沒有家長T0，可進入F，不進入BD／EF。原始提交及永久家庭ID保留。
-        - **重填**：只在同一學生輪次內比較家長重填，不跨T0／T1刪除。BD仍須確認同一成人，另列實際測量間隔。
+        - **重填**：只在同一學生輪次內比較家長重填，不跨T0／T1刪除。另列實際測量間隔。
         ''')
     st.markdown("""
     - **追蹤孩子**：家長回應依問卷所指孩子連結，不能用家長電話把兄弟姊妹合併。
@@ -283,11 +283,18 @@ with method:
     - **分母**：每項指標使用其有效N；跨期樣本與每輪全部樣本的分母不同。
     - **首頁與描述統計**：首頁包括全部學校；描述統計預設只限主流學校，頁面會列明學校範圍及其他篩選造成的數量差。
     - **最終樣本與候選比較**：AC／BD／E／F每行是一組兩份選定回應；EF每行是一組四份選定回應。候選比較包括未被選為最終T0／T1的回應，一宗候選不是一組最終样本。
-    - **BD家長身份**：兩份回應須指向同一孩子，成人出生年份有效且一致，所有聯絡欄中任一精確電話／電郵相同即可。多項聯絡逐項拆分，比對電話或電郵集合的交集；本人聯絡不同仍可使用其他共同聯絡。與孩子關係保留為原填資料，不作確認門檻。電話近似不作成人自動確認。逐宗人工裁定另行保留。
     - **電話近似及轉校**：本次接受同校且電話只差一個數字，以及相同聯絡但轉校；孩子完整生日及性別仍須相同，候選及整組不得有矛盾。電話互換兩位、電話近似兼轉校仍待審。
     - **親子身份與測量輪次**：身份確認與日期選取分開。親子須先確認指向同一孩子，再依當版輪次規則選取，輸出另保存日期差。
     - **年級／日期提示**：按香港時間、9月為學年分界及已知小學／中學階段作初步檢查；提示可涉及跳級、年級下降、跨學年不變、階段不明及批次日期。提示不會自行更正、拒配或排除回應。
     """)
+    if summary.get('bd_pairing_policy') == 'selected_parent_waves_same_child_v1':
+        st.markdown('**BD家長身份**：配對同一孩子已選定的 B（家長T0）及 D（家長T1）；成人填卷人可以不同。缺少或排除其中一份時不另選回應。同一成人的證據另列，不是BD入選條件。家長PHQ描述各輪填卷成人；成人未確認相同時不解讀為同一成人的跨期變化。')
+    elif summary.get('bd_pairing_policy') is None and summary.get('bd_requires_same_adult') is True:
+        st.markdown('**BD家長身份**：BD仍須同一成人。兩份回應須指向同一孩子，成人出生年份有效且一致，所有聯絡欄中任一精確電話／電郵相同即可。多項聯絡逐項拆分，比對電話或電郵集合的交集；本人聯絡不同仍可使用其他共同聯絡。與孩子關係保留為原填資料，不作確認門檻。電話近似不作成人自動確認。逐宗人工裁定另行保留。')
+    elif summary.get('bd_pairing_policy') is None and summary.get('bd_requires_same_adult') is False:
+        st.markdown('**BD家長身份**：此版本不要求同一成人；請依此版本已發布的正式樣本查看配對，成人身份須另按證據判斷。')
+    else:
+        st.markdown('**BD家長身份**：此版本未提供可識別的BD配對政策；成人身份須另按證據判斷。')
 with evidence_tab:
     st.caption('Final analytical samples use the current eligibility mode. Candidate review remains published OFF/reference and is not changed.')
     view = st.radio("配對證據檢視", ["最終分析樣本（對照首頁）", "候選比較（供審核）"], horizontal=True, key="evidence_view")
@@ -296,7 +303,9 @@ with evidence_tab:
             st.info('Requested ON final samples are unavailable. Select OFF for canonical details.')
         else:
             try:
-                sample = st.selectbox("最終樣本", list(SAMPLE_NAMES), format_func=SAMPLE_NAMES.get, key="final_sample")
+                from study2.dashboard_views import sample_names
+                names = sample_names(summary)
+                sample = st.selectbox("最終樣本", list(names), format_func=names.get, key="final_sample")
                 rows=eligibility.sample_rows(sample_frame,parent_frame,sample)
                 expected=eligibility.sample_count(sample,rows,summary)
                 count_columns = st.columns(2)
@@ -314,7 +323,12 @@ with evidence_tab:
                 else:
                     st.caption("每行是一組兩份最終選定回應，包括全部學校。只列實際納入該樣本的提交，不列其他重填或額外候選。")
                 if sample == "BD":
-                    st.caption("使用BD專用的同一成人選擇；家長T1可與D／F的最新家長回應不同。")
+                    if summary.get('bd_pairing_policy') == 'selected_parent_waves_same_child_v1':
+                        st.caption("配對同一孩子已選定的B（家長T0）及D（家長T1）；填卷成人可以不同，不會另選T1。")
+                    elif summary.get('bd_pairing_policy') is None and summary.get('bd_requires_same_adult') is True:
+                        st.caption("使用BD專用的同一成人選擇；家長T1可與D／F的最新家長回應不同。")
+                    else:
+                        st.caption("此版本的BD配對以已發布的正式樣本為準；成人身份須另按證據判斷。")
                 if sample in {"E", "F", "EF"}:
                     st.caption('親子確認指向同一孩子；家長按學生香港日期分輪，日期差另列。' if student_anchored else '親子確認指向同一孩子，不限制學生與家長日期差。')
                 display = sample_display(rows, sample)
@@ -413,7 +427,7 @@ with tracking_tab:
     st.caption('Published OFF/reference administrative tracking. Analytical exclusions do not change registrations, invitations or decisions.')
     from study2.dyad_operator import STATES, FOLLOWUPS, readable_reason, safe_note
     st.subheader("永久親子追蹤")
-    st.caption("每個永久ID追蹤同一孩子的家庭，換填卷家長仍沿用。兄弟姊妹各自登記。家長是否同一成人仍按BD規則判斷。")
+    st.caption("每個永久ID追蹤同一孩子的家庭，換填卷家長仍沿用。兄弟姊妹各自登記。家長是否同一成人須另按成人身份證據判斷。")
     path = release_path / 'dyad_tracking.parquet'
     if not path.exists():
         st.info("目前發布版本尚未加入永久親子ID。登記及驗證完成後，此頁會顯示家庭追蹤。")

@@ -61,6 +61,19 @@ def build_manual_export(snapshot, scope_export, records, analysis, parents, meas
         active['views'] = build_views(analysis, parents, measurements, summary, '.',
             snapshot['minimum_cell_n'], progress, prepared_scopes=scopes,
             retain_residual=snapshot.get('source_selection', {}).get('residual_present', False))
+        from .bd_pairing import POLICY as CHILD_BD_POLICY
+        if summary.get('bd_pairing_policy') == CHILD_BD_POLICY:
+            # An exclusion can empty an independent-parent subgroup. An empty
+            # ON cube cannot establish grade fields absent in canonical OFF.
+            originals = {(v['mode'], v['role'], v['mainstream'], v['source']): v
+                         for v in snapshot['views']}
+            for view in active['views']:
+                original = originals.get((view['mode'], view['role'], view['mainstream'], view['source']), {})
+                before, after = original.get('grade'), view.get('grade')
+                if (before == {'status': 'unavailable', 'code': 'published_grade_fields_unavailable'} and
+                        isinstance(after, dict) and after.get('status') == 'available' and
+                        all(not any(cell.get('counts', {}).values()) for cell in after.get('cells', []))):
+                    view['grade'] = deepcopy(before)
         for row in projection.impact['samples']:
             if row['baseline'] is not None:
                 _need(snapshot['counts'].get(row['code']) == row['baseline'],

@@ -66,7 +66,7 @@ def unavailable_scope(code, release_id=None):
                 release_id=release_id, index_revision=None, school_bindings=[])
 
 
-def build_scope_export(folder, summary, minimum=0, *, school_binding=None):
+def build_scope_export(folder, summary, minimum=0, *, school_binding=None, prepared=None):
     """Exact published membership only. No source aggregates or new selection.
 
     The optional school binding is a locally trusted, already supplied public
@@ -82,9 +82,12 @@ def build_scope_export(folder, summary, minimum=0, *, school_binding=None):
     try:
         with gzip.open(path, 'rt', encoding='utf-8') as handle:
             records = [json.loads(line) for line in handle if line.strip()]
-        analysis = pd.read_parquet(folder / 'analysis.parquet')
-        adult_path = folder / 'parent_longitudinal.parquet'
-        adults = pd.read_parquet(adult_path) if adult_path.exists() else None
+        if prepared is None:
+            analysis = pd.read_parquet(folder / 'analysis.parquet')
+            adult_path = folder / 'parent_longitudinal.parquet'
+            adults = pd.read_parquet(adult_path) if adult_path.exists() else None
+        else:
+            analysis, adults = prepared
         ledger_path = folder / 'scope_flow_evidence.json'
         ledger = None
         if ledger_path.exists():
@@ -216,6 +219,11 @@ def english_snapshot(snapshot, summary):
         'school_batch': 'School batch', 'socialworkdream': 'Social Work Dream'}
     snapshot['source_names'] = {key: source_labels.get(key, key) for key in snapshot['source_names']}
     snapshot['notes'] = DISPLAY_NOTES
+    from .bd_pairing import POLICY as CHILD_BD_POLICY
+    if summary.get('bd_pairing_policy') == CHILD_BD_POLICY:
+        snapshot['notes'] = [(label, 'BD pairs the selected parent responses for the same child; the responding adult may differ. Parent PHQ summaries are per wave. Paired PHQ results require confirmed same-adult evidence for the selected pairs. Independent-parent samples remain separate.'
+                              if label == 'Respondent continuity' else value)
+                             for label, value in DISPLAY_NOTES]
     for row in snapshot['dictionary']:
         row['label'] = row['variable_id']
         row['unit'] = DISPLAY_UNITS.get(row['unit'], row['unit'])
@@ -239,7 +247,8 @@ def english_snapshot(snapshot, summary):
         # Original category codes/labels and every numeric value remain intact.
     for row in snapshot['samples']:
         code = row['sample']
-        row['label'] = (bd_sample_text('same_adult' if summary.get('adult_identity_policy') == ADULT_POLICY
+        row['label'] = (bd_sample_text('same_child' if summary.get('bd_pairing_policy') == CHILD_BD_POLICY else
+                                     'same_adult' if summary.get('adult_identity_policy') == ADULT_POLICY
                                      and snapshot['counts'].get('BD') is not None else None)
                         if code == 'BD' else english('sample.' + code.lower()))
     stage_keys = {'1.1': '1_1', '1.3/2.1.1/2.1.2': '1_3_2_1_1_2_1_2',
@@ -566,15 +575,30 @@ def build_views(frame, parents, measurements, summary, folder, minimum, progress
     return views
 
 
-def build_snapshot(folder, summary, imported, minimum=0, progress=None):
+def build_snapshot(folder, summary, imported, minimum=0, progress=None, *, prepared=None):
     if minimum < 0:
         raise PipelineError('彙總人數門檻不可為負數。')
     folder = Path(folder)
     if summary.get('descriptive', {}).get('version') != VERSION:
         raise PipelineError('請先發布使用目前描述統計版本的資料，不能猜測舊版口徑。')
-    frame = pd.read_parquet(folder / 'analysis.parquet')
-    parent_file = folder / 'parent_longitudinal.parquet'
-    parents = pd.read_parquet(parent_file) if parent_file.exists() else None
+    if prepared is None:
+        frame = pd.read_parquet(folder / 'analysis.parquet')
+        parent_file = folder / 'parent_longitudinal.parquet'
+        parents = pd.read_parquet(parent_file) if parent_file.exists() else None
+    else:
+        frame, parents = prepared
+    if summary.get('bd_pairing_policy'):
+        from .bd_pairing import POLICY as CHILD_BD_POLICY, selected_parent_pairs
+        metadata = {'bd_pairing_policy', 'bd_adult_status', 'bd_adult_rule', 'adult_continuity_confirmed'}
+        if (summary['bd_pairing_policy'] != CHILD_BD_POLICY or parents is None or
+                not metadata <= set(parents.columns) or not parents['bd_pairing_policy'].eq(CHILD_BD_POLICY).all()):
+            raise PipelineError('Selected-BD summary and parent evidence do not agree.')
+        expected = selected_parent_pairs(frame)
+        slots = {(r.child_id, 'T0', r.t0) for r in expected.itertuples(index=False)} | {
+                 (r.child_id, 'T1', r.t1) for r in expected.itertuples(index=False)}
+        actual = set(zip(parents.child_id, parents.wave, parents.submission_id))
+        if len(parents) != len(slots) or actual != slots:
+            raise PipelineError('Selected-BD artifact does not contain the complete selected slots.')
     measurements = pd.read_parquet(folder / 'descriptive_measurements.parquet')
     check = sample_reconciliation(frame, parents, {key: value for key, value in summary.items()
                                                    if parents is not None or key != 'BD'})
@@ -582,6 +606,7 @@ def build_snapshot(folder, summary, imported, minimum=0, progress=None):
         raise PipelineError('首頁及正式樣本數不一致，停止靜態匯出。')
     # No arbitrary labels from source files are copied into the public object.
     frame = frame.copy()
+    parents = parents.copy() if parents is not None else None
     imported = imported.copy()
     for table in (frame, *([parents] if parents is not None else []), imported):
         table['source_type'] = table['source_type'].where(table['source_type'].isin(SOURCE_NAMES), 'unknown')
@@ -633,6 +658,8 @@ def build_snapshot(folder, summary, imported, minimum=0, progress=None):
                                 for r in dictionary_rows()],
                     parent_wave_policy=summary.get('parent_wave_policy', ''),
                     views=build_views(frame, parents, measurements, summary, folder, minimum, progress))
+    if summary.get('bd_pairing_policy'):
+        snapshot['bd_pairing_policy'] = summary['bd_pairing_policy']
     if minimum == 0:
         snapshot['grade'] = grade_header(summary['release_id'])
         if set(SOURCE_NAMES) == set(SOURCE_CODES):
@@ -644,6 +671,20 @@ def build_snapshot(folder, summary, imported, minimum=0, progress=None):
 
 def validate_snapshot(snapshot):
     """Defence in depth after the explicit projections above."""
+    if 'bd_projection' in snapshot:
+        from .bd_pairing import POLICY as CHILD_BD_POLICY
+        projection = snapshot['bd_projection']
+        fields = {'format', 'policy', 'source_release_id', 'source_analysis_sha256',
+                  'source_parent_sha256', 'source_tracking_sha256', 'source_summary_sha256',
+                  'source_checksums_sha256', 'revision'}
+        if (not isinstance(projection, dict) or set(projection) != fields or
+                projection['format'] != 'study2_bd_selected_projection_v1' or
+                projection['policy'] != CHILD_BD_POLICY or snapshot.get('bd_pairing_policy') != CHILD_BD_POLICY or
+                projection['source_release_id'] != snapshot['release_id'] or
+                any(not isinstance(projection[k], str) or not re.fullmatch('[0-9a-f]{64}', projection[k])
+                    for k in fields if k.endswith('_sha256') or k == 'revision') or
+                projection['revision'] != digest({k: v for k, v in projection.items() if k != 'revision'})):
+            raise PipelineError('Invalid selected-BD projection provenance.')
     private_keys = {'submission_id', 'child_id', 'respondent_id', 'version_id', 'case_id', 'dyad_id',
                     'school', 'school_a', 'phone', 'email', 'dob', 'raw', 'source_label', 'path', 'reason'}
     forbidden = re.compile(r'(?:\b(?:SUB|CHILD|CASE|REV|DYAD|PKG|DEC)_\w+|/(?:Users|home)/|'
@@ -673,6 +714,18 @@ def validate_snapshot(snapshot):
         minimum = snapshot.get('minimum_cell_n', 0)
         if type(minimum) is not int or minimum < 0 or snapshot['period_selection']['minimum_cell_n'] != minimum:
             raise PipelineError('Period catalog and snapshot suppression thresholds differ.')
+    if 'period_semester_selection' in snapshot:
+        from .static_period_assets import validate_semester_catalog
+        catalog = validate_semester_catalog(snapshot['period_semester_selection'], snapshot['release_id'])
+        minimum = snapshot.get('minimum_cell_n', 0)
+        if type(minimum) is not int or minimum < 0 or catalog['minimum_cell_n'] != minimum:
+            raise PipelineError('Semester catalog and snapshot suppression thresholds differ.')
+        context = snapshot.get('release_context')
+        if context is not None and catalog['active_on_revision'] != context['flags']['manifest_revision']:
+            raise PipelineError('Semester catalog and release control revisions differ.')
+        on_context = snapshot.get('eligibility_context')
+        if on_context is not None and on_context.get('mode') == 'on' and catalog['active_on_revision'] != on_context.get('revision'):
+            raise PipelineError('Semester catalog and selected control revisions differ.')
     json.dumps(plain(snapshot), allow_nan=False)
 
 
@@ -770,24 +823,33 @@ def _lazy_index(html, boot_script):
 
 
 def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=None,
-               verify_inputs=None, input_inventory=None, period_assets=None):
+               verify_inputs=None, input_inventory=None, period_assets=None, semester_assets=None):
     from .static_assets import APP_JS, HTML, STYLES
     from .static_scope_client import JS_SOURCE as SCOPE_JS
     from .static_quality_ui import JS_SOURCE as QUALITY_JS
     validate_snapshot(snapshot)
-    from .static_period_assets import empty_assets, validate_assets
+    from .static_period_assets import empty_assets, validate_assets, empty_semester_assets, validate_semester_assets
     if 'period_selection' in snapshot:
         if period_assets is None:
             raise PipelineError('Combined period assets are required for their declared catalog.')
         validate_assets(snapshot['period_selection'], period_assets, snapshot['release_id'])
     else:
         period_assets = empty_assets(snapshot['release_id'])
+    if 'period_semester_selection' in snapshot:
+        if semester_assets is None:
+            raise PipelineError('Semester assets are required for their declared catalog.')
+        validate_semester_assets(snapshot['period_semester_selection'], semester_assets, snapshot['release_id'])
+    else:
+        semester_assets = empty_semester_assets(snapshot['release_id'])
     if scope_export is None:
         scope_export = unavailable_scope('compatible_scope_export_required', snapshot['release_id'])
     validate_scope_export(scope_export, snapshot)
     from .manual_exclusion_export import JS_HASH, validate_manual_export
     if manual_exclusion is not None:
         validate_manual_export(manual_exclusion, snapshot, scope_export)
+        if ('period_semester_selection' in snapshot and manual_exclusion['status'] == 'available' and
+                snapshot['period_semester_selection']['active_on_revision'] != manual_exclusion['revision']):
+            raise PipelineError('Semester catalog and manual exclusion revisions differ.')
     destination = Path(destination).absolute()
     if destination.is_symlink():
         raise PipelineError('匯出位置不可是捷徑。')
@@ -808,7 +870,7 @@ def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=Non
         html = HTML if 'src="manual-exclusion.js"' in HTML else HTML.replace(
             '<script defer src="app.js">', '<script defer src="manual-exclusion.js"></script><script defer src="app.js">')
         packed_snapshot = plain(pack_snapshot(snapshot))
-        contents = {**ACCESS_FILES, **period_assets, 'index.html': html, 'app.js': APP_JS, 'styles.css': STYLES,
+        contents = {**ACCESS_FILES, **period_assets, **semester_assets, 'index.html': html, 'app.js': APP_JS, 'styles.css': STYLES,
                     'snapshot.js': 'window.STUDY2_SNAPSHOT=' + json.dumps(packed_snapshot, ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-index.js': 'window.STUDY2_SCOPE_EXPORT=' + json.dumps(plain(scope_export), ensure_ascii=False, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c') + ';\n',
                     'scope-engine.js': SCOPE_JS, 'quality-ui.js': QUALITY_JS,
@@ -851,6 +913,8 @@ def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=Non
                 ('format', 'hash_scheme', 'status', 'revision', 'inventory_revision', 'on_revision')}
         if 'release_context' in snapshot:
             manifest['release_context'] = snapshot['release_context']
+        if 'bd_projection' in snapshot:
+            manifest['bd_projection'] = snapshot['bd_projection']
         (stage / 'snapshot-manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         if verify_inputs:
             verify_inputs()
@@ -914,7 +978,7 @@ def _input_inventory(folder, state, release_root):
 
 
 def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None, manual_manifest=None,
-                  release_context=None, default_eligibility='off'):
+                  release_context=None, default_eligibility='off', project_selected_bd=False):
     if default_eligibility not in {'off', 'on'} or default_eligibility == 'on' and release_context is None:
         raise PipelineError('Default ON requires an explicit validated dashboard release context.')
     state = Path(cfg['state_dir']).resolve()
@@ -955,7 +1019,31 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             raise PipelineError('Published file and database pointers disagree; previous export retained.')
         if json.loads((folder / 'summary.json').read_text()) != summary:
             raise PipelineError('Published summary file and frozen database summary disagree.')
-        pins['published_summary'] = dict(sha256=digest(summary))
+        published_summary = summary
+        prepared = None
+        bd_projection = None
+        if project_selected_bd:
+            if release_context is None or manual_manifest is None:
+                raise PipelineError('A selected-BD projection requires the bound release context and accepted exclusions.')
+            checksums_pin = _file_pin(folder / 'checksums.json')
+            if checksums_pin is None:
+                raise PipelineError('A selected-BD projection requires published checksums.')
+            checksums = json.loads((folder / 'checksums.json').read_text())
+            required = ('summary.json', 'analysis.parquet', 'parent_longitudinal.parquet', 'dyad_tracking.parquet')
+            if any(pins.get(name) is None or checksums.get(name) != pins[name]['sha256'] for name in required):
+                raise PipelineError('A selected-BD projection input differs from the published checksums.')
+            from .bd_pairing import POLICY as CHILD_BD_POLICY, project_published_selection
+            frame, parents, summary = project_published_selection(
+                pd.read_parquet(folder / 'analysis.parquet'), pd.read_parquet(folder / 'dyad_tracking.parquet'), summary)
+            prepared = (frame, parents)
+            bd_projection = dict(format='study2_bd_selected_projection_v1', policy=CHILD_BD_POLICY,
+                source_release_id=release['release_id'], source_analysis_sha256=pins['analysis.parquet']['sha256'],
+                source_parent_sha256=pins['parent_longitudinal.parquet']['sha256'],
+                source_tracking_sha256=pins['dyad_tracking.parquet']['sha256'],
+                source_summary_sha256=pins['summary.json']['sha256'], source_checksums_sha256=checksums_pin['sha256'])
+            bd_projection['revision'] = digest(bd_projection)
+            pins['bd_projection_checksums'] = checksums_pin
+        pins['published_summary'] = dict(sha256=digest(published_summary))
         pins['legacy_source_counts'] = dict(sha256=digest(source_counts))
         pins['supplied_school_binding'] = dict(sha256=digest(school_binding)) if school_binding is not None else None
         pins['supplied_manual_manifest'] = dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None
@@ -971,7 +1059,7 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             run = dict(run)
             pins['analytical_run'] = dict(sha256=digest(run))
             pins['export_program_hash'] = dict(sha256=program_hash())
-        initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest', 'supplied_release_context', 'analytical_run', 'export_program_hash'}}
+        initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest', 'supplied_release_context', 'analytical_run', 'export_program_hash', 'bd_projection_checksums'}}
         def verify():
             now = current(db)
             counts_now = sorted(imported_source_counts(db, release['run_id']), key=lambda row: json.dumps(row, sort_keys=True))
@@ -980,19 +1068,25 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
                     (dict(sha256=digest(school_binding)) if school_binding is not None else None) != pins['supplied_school_binding'] or
                     (dict(sha256=digest(manual_manifest)) if manual_manifest is not None else None) != pins['supplied_manual_manifest'] or
                     (dict(sha256=digest(release_context)) if release_context is not None else None) != pins['supplied_release_context'] or
+                    (project_selected_bd and _file_pin(folder / 'checksums.json') != pins['bd_projection_checksums']) or
                     (run is not None and dict(db.execute('SELECT run_id, fingerprint FROM runs WHERE run_id=?',
                         (release['run_id'],)).fetchone() or {}) != run) or
                     (run is not None and program_hash() != pins['export_program_hash']['sha256'])):
                 raise PipelineError('Published inputs or pointer changed during export; previous export retained.')
-        scope = build_scope_export(folder, summary, minimum, school_binding=school_binding)
-        snapshot = build_snapshot(folder, summary, imported, minimum, progress)
+        scope = build_scope_export(folder, summary, minimum, school_binding=school_binding, prepared=prepared)
+        snapshot = build_snapshot(folder, summary, imported, minimum, progress, prepared=prepared)
+        if bd_projection is not None:
+            snapshot['bd_projection'] = bd_projection
         snapshot['published_at'] = release['created_at']
         # Fine date/profile moments live only in separately lazy-loaded assets.
         # The same OFF/ON catalog is immutable in both snapshots, preserving the
         # existing exclusion wrapper's strict metadata comparison and hashes.
-        analysis = pd.read_parquet(folder / 'analysis.parquet')
-        parent_path = folder / 'parent_longitudinal.parquet'
-        parents = pd.read_parquet(parent_path) if parent_path.exists() else None
+        if prepared is None:
+            analysis = pd.read_parquet(folder / 'analysis.parquet')
+            parent_path = folder / 'parent_longitudinal.parquet'
+            parents = pd.read_parquet(parent_path) if parent_path.exists() else None
+        else:
+            analysis, parents = prepared
         measurements = pd.read_parquet(folder / 'descriptive_measurements.parquet')
         panel = None
         if summary.get('independent_parent'):
@@ -1014,13 +1108,19 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             manual_export = build_manual_export(snapshot, scope, records, analysis, parents,
                 measurements, summary, imported, manual_manifest, panel=panel, progress=progress)
             if release_context is not None and manual_export['status'] != 'available':
-                raise PipelineError('Dashboard release context requires a complete valid ON/OFF export.')
-        from .static_period_assets import prepare_assets
+                code = manual_export.get('code')
+                suffix = ' (' + code + ')' if isinstance(code, str) and re.fullmatch('[a-z0-9_]+', code) else ''
+                raise PipelineError('Dashboard release context requires a complete valid ON/OFF export.' + suffix)
+        from .static_period_assets import prepare_assets, prepare_semester_assets
         accepted_on = manual_export is not None and manual_export['status'] == 'available'
         period_catalog, period_assets = prepare_assets(analysis, parents, measurements, summary,
             records=records, manifest=manual_manifest if accepted_on else None,
             panel=panel, minimum=minimum, progress=progress)
+        semester_catalog, semester_assets = prepare_semester_assets(analysis, parents, measurements, summary,
+            records=records, manifest=manual_manifest if accepted_on else None,
+            panel=panel, minimum=minimum, progress=progress)
         snapshot['period_selection'] = period_catalog
+        snapshot['period_semester_selection'] = semester_catalog
         if manual_export is not None:
             # Add the same validated lazy index to both immutable snapshots.
             # Only an already valid ON bundle can authorize an ON period cube.
@@ -1029,12 +1129,13 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             manual_export['off']['snapshot_revision'] = sha(plain(pack_snapshot(snapshot)))
             if accepted_on:
                 manual_export['on']['snapshot']['period_selection'] = plain(period_catalog)
+                manual_export['on']['snapshot']['period_semester_selection'] = plain(semester_catalog)
                 manual_export['on_revision'] = sha(manual_export['on'])
             validate_manual_export(manual_export, snapshot, scope)
         verify()
         return write_site(snapshot, destination, scope_export=scope,
                           manual_exclusion=manual_export, verify_inputs=verify, input_inventory=pins,
-                          period_assets=period_assets)
+                          period_assets=period_assets, semester_assets=semester_assets)
     finally:
         db.close()
 
@@ -1047,6 +1148,8 @@ def main():
     parser.add_argument('--release-context', type=Path, help='Strict current-run aggregate control provenance')
     parser.add_argument('--default-eligibility', choices=('off', 'on'), default='off',
                         help='Explicit initial analytical mask; ON requires a validated release context')
+    parser.add_argument('--project-selected-bd', action='store_true',
+                        help='Derive a reviewable same-child BD view from the pinned legacy selected waves')
     args = parser.parse_args()
     def supplied(path):
         if path is None:
@@ -1056,7 +1159,7 @@ def main():
         return json.loads(path.read_bytes())
     print(json.dumps(export_static(load_config(args.config), args.output,
         manual_manifest=supplied(args.manual_manifest), release_context=supplied(args.release_context),
-        default_eligibility=args.default_eligibility), ensure_ascii=False))
+        default_eligibility=args.default_eligibility, project_selected_bd=args.project_selected_bd), ensure_ascii=False))
 
 
 if __name__ == '__main__':

@@ -191,8 +191,8 @@ const Study2ManualEligibility=(()=>{
   }
   // The small initial bundle is generated only after the complete native
   // export has passed validate_manual_export. Its exact bytes are pinned by
-  // the same-origin HTML's SRI, and only the first-tab data is usable here.
-  // OFF and all other tabs still require the complete existing validator.
+  // the same-origin HTML's SRI. The metadata and both scope exports are
+  // usable here; other descriptive views still require the complete bundle.
   function createBootstrap(boot,engine){
     need(keys(boot,['format','release_id','revision','inventory_revision','policy','off','on','impact','bindings']), 'bootstrap_shape');
     need(boot.format==='study2_lazy_bootstrap_v1'&&boot.policy===POLICY&&hash(boot.revision)&&hash(boot.inventory_revision),'bootstrap_metadata');
@@ -209,6 +209,7 @@ const Study2ManualEligibility=(()=>{
     impact(boot.impact);validateSnapshots(original,active,boot);
     scopeExport(off.scope_export,boot.release_id,engine);scopeExport(on.scope_export,boot.release_id,engine);
     const baseline=engine.query(off.scope_export.index),selected=engine.query(on.scope_export.index),e=selected.eligibility;
+    need(!Object.hasOwn(off.scope_export.index,'eligibility')&&!Object.hasOwn(baseline,'eligibility'),'bootstrap_off_scope_invalid');
     need(e&&e.mode==='on'&&e.revision===boot.revision&&e.inventory_revision===boot.inventory_revision,'manual_scope_revision_mismatch');
     need(canonical(baseline.raw)===canonical(selected.raw)&&canonical(baseline.flow)===canonical(selected.flow),'manual_history_mismatch');
     need(canonical(e.intake)===canonical(boot.impact.intake)&&canonical(e.samples)===canonical(boot.impact.samples),'manual_impact_mismatch');
@@ -218,11 +219,18 @@ const Study2ManualEligibility=(()=>{
       if(row.baseline!==null)need(original.counts?.[row.code]===row.baseline&&active.counts?.[row.code]===row.active,'manual_count_mismatch');}
     if(boot.impact.independent!==null)for(const [key,row] of Object.entries(boot.impact.independent))
       need(original.independent_counts?.[key]===row.baseline&&active.independent_counts?.[key]===row.active,'manual_independent_count_mismatch');
-    freeze(boot);
-    function metadata(){return Object.freeze({eligibility_mode:'on',eligibility_revision:boot.revision,
+    freeze(boot);let mode='on',activeBundle=on;
+    function metadata(){return Object.freeze({eligibility_mode:mode,eligibility_revision:boot.revision,
       eligibility_inventory_revision:boot.inventory_revision,eligibility_release_id:boot.release_id,
       eligibility_policy:POLICY,eligibility_status:'available'});}
     function quality(result){
+      if(mode==='off'){
+        need(!Object.hasOwn(result,'eligibility'),'manual_scope_revision_mismatch');
+        const intake=Object.fromEntries(ROLES.map(r=>[r,{baseline:result.raw[r],excluded:0,retained:result.raw[r]}]));
+        const samples=result.samples.map(s=>({code:s.code,baseline:s.count,active:s.count,excluded:s.status==='available'?0:null}));
+        return {format:'study2_manual_exclusion_ui_v1',mode,revision:boot.revision,inventory_revision:boot.inventory_revision,
+          release_id:boot.release_id,policy:POLICY,status:'available',code:null,intake,samples};
+      }
       const current=result.eligibility;need(current&&current.mode==='on'&&current.revision===boot.revision&&
         current.inventory_revision===boot.inventory_revision,'manual_scope_revision_mismatch');
       const before=engine.query(off.scope_export.index,result.scope);need(canonical(result.raw)===canonical(before.raw),'manual_history_mismatch');
@@ -231,8 +239,8 @@ const Study2ManualEligibility=(()=>{
       return {format:'study2_manual_exclusion_ui_v1',mode:'on',revision:boot.revision,inventory_revision:boot.inventory_revision,
         release_id:boot.release_id,policy:POLICY,status:'available',code:null,intake:current.intake,samples:current.samples};
     }
-    return Object.freeze({configured:true,available:true,reason:null,mode:'on',bundle:on,metadata,quality,
-      select(requested){need(requested==='on','bootstrap_full_required');return on;}});
+    return Object.freeze({configured:true,available:true,reason:null,get mode(){return mode;},get bundle(){return activeBundle;},metadata,quality,
+      select(requested){need(['off','on'].includes(requested),'manual_mode_invalid');mode=requested;activeBundle=requested==='on'?on:off;return activeBundle;}});
   }
   return Object.freeze({create,createBootstrap,digest,canonical});
 })();

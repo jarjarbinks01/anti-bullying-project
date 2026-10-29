@@ -17,6 +17,14 @@ SAMPLE_NAMES = {
     "C": "C｜全部學生 T1",
     "D": "D｜全部家長 T1（可換填卷人）",
 }
+
+
+def sample_names(summary):
+    from .bd_pairing import POLICY
+    names = dict(SAMPLE_NAMES)
+    if summary.get('bd_pairing_policy') == POLICY:
+        names['BD'] = 'BD｜同一孩子的家長 T0／T1（填卷人可不同）'
+    return names
 SLOTS = {
     "A": [("student", "T0")], "B": [("parent", "T0")],
     "C": [("student", "T1")], "D": [("parent", "T1")],
@@ -125,7 +133,7 @@ def selected_sample(frame, parent_longitudinal, sample):
 
 def sample_reconciliation(frame, parent_longitudinal, summary):
     rows = []
-    for sample, label in SAMPLE_NAMES.items():
+    for sample, label in sample_names(summary).items():
         if sample not in summary:
             continue
         count = len(selected_sample(frame, parent_longitudinal, sample))

@@ -21,7 +21,7 @@ def range_note(key):
 MODES = {
     'abcd': '各輪全部樣本（A／B／C／D）',
     'ef': '各輪親子樣本（E／F）',
-    'acbd': '同一人跨期樣本（AC／BD）',
+    'acbd': '學生／家長跨期樣本（AC／BD）',
     'efmatched': '跨期親子樣本（EF）',
 }
 REPORT_FILES = {

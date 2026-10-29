@@ -20,6 +20,7 @@ const Study2Scope = (() => {
       "extra_followup","short_interval_followup","pending_chronology","parent_before_student_baseline"],
     selected:["selected"]};
   const adultPolicy = "same_child_valid_equal_birth_year_any_exact_contact_relationship_informational";
+  const childBdPolicy = "selected_parent_waves_same_child_v1";
   const unsafe = /[<>\x00-\x08\x0a-\x1f\x7f]|(?:https?:\/\/|www\.|mailto:)|[\w.+-]+@[\w.-]+\.\w+|(?:[/\\][\w.-]+[/\\])|(?:SUB|GROUP|RESP|DYAD)_[A-Za-z0-9_-]+|(?:CHILD|CASE|REV|PKG|RB|DEC|DRES|DEVENT|INV)_[0-9a-f]{20,}|\bR_[A-Za-z0-9]{10,}\b/i;
   const privateReleaseLabel=/\bRUN_[A-Za-z0-9_-]+/i;
   const phone=/\+?[0-9][0-9 \t.()/\-\u2010-\u2015\u2212]{6,}[0-9]/;
@@ -69,7 +70,10 @@ const Study2Scope = (() => {
       need(["available","unavailable"].includes(item.status),"invalid_feature_status");
       if(item[key]!==null) token(item[key]); if(item.reason!==null) token(item.reason);
       if(item.status==="available") need(item.reason===null && item[key]!==null,"missing_feature_provenance");
-      if(feature==="adult") need(item.status==="available" ? item.policy===adultPolicy && item.evidence==="formal_parent_longitudinal_artifact" : item.evidence===null,"unsupported_adult_policy_or_evidence");
+      if(feature==="adult") need(item.status==="available" ?
+        (item.policy===adultPolicy && item.evidence==="formal_parent_longitudinal_artifact") ||
+        (item.policy===childBdPolicy && item.evidence==="selected_parent_longitudinal_artifact") :
+        item.evidence===null,"unsupported_adult_policy_or_evidence");
     }
     fields(meta.reconciliation,["status","checked"]);
     need(["checked","partial"].includes(meta.reconciliation.status) && Array.isArray(meta.reconciliation.checked) &&
