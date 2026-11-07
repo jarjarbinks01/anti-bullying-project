@@ -172,6 +172,10 @@ def input_records(cfg: dict, manifest: dict, db=None) -> list[dict]:
                 record["time_confidence"] = ("accepted_creation_time" if record["date_basis"] == "batch_assigned_creation" else "observed") if record["observed_at"] else "unknown"
                 record["date_policy"] = "current_creation_time_accepted_by_research_owner_20261006"
                 record["source_label"] = label
+                from .source_time_transitions import prior_creation_times
+                prior_times = prior_creation_times(db, record)
+                if prior_times:
+                    record["approved_creation_time_history"] = prior_times
                 records.append(record)
         elif source["kind"] == "system":
             normalized = online.normalize_system_columns(frame.copy())

@@ -11,6 +11,8 @@ from study2.static_scope_client import JS_SOURCE as SCOPE
 
 
 def test_js_rejects_private_and_unexpected_nested_fields(tmp_path):
+    if not os.environ.get('MANUAL_UI_CORE_FIXTURE_DIR'):
+        pytest.skip('Optional synthetic core_r2 schema fixture requires MANUAL_UI_CORE_FIXTURE_DIR')
     root=Path(os.environ['MANUAL_UI_CORE_FIXTURE_DIR'])
     payload=dict(data=json.loads((root/'SYNTHETIC_FIXTURE.json').read_text()),ui=UI,
                  scope=SCOPE,hash=(root/'HASH_CANONICAL.js').read_text())
@@ -93,6 +95,8 @@ def test_js_accepts_core_generated_empty_manifest_and_all_excluded_catalogues(tm
     from study2.common import plain
     from study2.static_export import pack_snapshot
     import test_manual_exclusion_validation as core
+    if not os.environ.get('MANUAL_UI_ORIGINAL_CORE_FIXTURE_DIR'):
+        pytest.skip('Optional original synthetic core_r1 schema fixture requires MANUAL_UI_ORIGINAL_CORE_FIXTURE_DIR')
     root=Path(os.environ['MANUAL_UI_ORIGINAL_CORE_FIXTURE_DIR'])
     monkeypatch.setattr(core,'FROZEN',root)
     value=json.loads((root/'SYNTHETIC_FIXTURE.json').read_text())

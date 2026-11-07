@@ -189,9 +189,14 @@ def test_context_and_selected_run_drift_during_export_retains_previous(exported,
     assert tree_bytes(site)==before
 
 
-def test_default_on_is_explicit_and_requires_context():
+def test_default_on_is_explicit_and_requires_context(tmp_path, monkeypatch):
+    # Admit an unmanaged synthetic workspace through the real consumer guard.
+    from study2.lean_recovery import ENVIRONMENT_PATHS
+    for name in ENVIRONMENT_PATHS:
+        monkeypatch.delenv(name, raising=False)
     with pytest.raises(PipelineError,match='explicit validated'):
-        export_static({},'unused',default_eligibility='on')
+        export_static({'state_dir': str(tmp_path/'state')},tmp_path/'unused',default_eligibility='on')
+    assert not (tmp_path/'unused').exists()
     from study2.static_release_context import bind_release_context
     from study2.group_cleaning import exclusion_manifest
     manifest=exclusion_manifest([], 'fresh-synthetic', [], operator='Synthetic',at='2026-01-01T00:00:00+00:00')
@@ -202,18 +207,27 @@ def test_default_on_is_explicit_and_requires_context():
 
 
 @pytest.mark.parametrize('drift',[False,True])
-def test_export_code_hash_guard_runs_before_install(tmp_path,monkeypatch,drift):
+def test_export_code_hash_guard_runs_before_install(exported,tmp_path,monkeypatch,drift):
     """Unit-level install gate; the full real-site retention cases are above."""
-    value,manifest,ctx=publication(tmp_path/'inputs')
+    value,manifest,ctx,original=exported
     import study2.static_export as module
+    from study2.manual_exclusion_export import _unpack
+    off=_unpack(load_script(original/'snapshot.js','window.STUDY2_SNAPSHOT='))
+    off.pop('release_context')
+    raw=(original/'manual-exclusion.js').read_text().split('window.STUDY2_MANUAL_EXCLUSION=',1)[1]
+    wrapper=json.loads(raw.removesuffix(';\n'))
     calls=[]
     def code_hash():
         calls.append('hash')
         return ('b' if drift and len(calls)>=3 else 'a')*64
-    monkeypatch.setattr('study2.runner.program_hash',code_hash)
-    monkeypatch.setattr(module,'build_snapshot',lambda *a,**k:dict(format='study2_static_v1',
-        release_id=value['summary']['release_id'],generated_at='2026-01-01T00:00:00Z',views=[]))
-    monkeypatch.setattr('study2.manual_exclusion_export.build_manual_export',lambda *a,**k:dict(status='available'))
+    monkeypatch.setattr('study2.controls_capture.code_revision',code_hash)
+    monkeypatch.setattr(module,'build_snapshot',lambda *a,**k:deepcopy(off))
+    def manual_export(snapshot,*args,**kwargs):
+        result=deepcopy(wrapper)
+        result['on']['snapshot']['release_context']=deepcopy(snapshot['release_context'])
+        return result
+    # Reuse a real validated wrapper, retaining native ON/OFF validation below.
+    monkeypatch.setattr('study2.manual_exclusion_export.build_manual_export',manual_export)
     installed=[]
     def install(*a,**kwargs):installed.append(True);kwargs['verify_inputs']();return {'guarded':True}
     monkeypatch.setattr(module,'write_site',install)

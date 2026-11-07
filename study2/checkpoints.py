@@ -86,12 +86,23 @@ def restore_checkpoint(folder,destination,verify_only=False):
             environment={name:str(destination/_safe_relative(relative)) if relative!='.' else str(destination)
                          for name,relative in bindings['environment'].items()}
             atomic_json(destination/'recovery_environment.json',environment)
+            config['runtime_environment']={**config.get('runtime_environment',{}),**environment}
             relocated=[]
             for item in bindings.get('external_dependencies',[]):
                 relocated.append({**item,'path':str(destination/_safe_relative(item['restore_path']))})
             config['recovery_policy']={**config.get('recovery_policy',{}),'required_assets':relocated}
             atomic_json(destination/'recovery_paths.json',{
                 source:str(destination/_safe_relative(relative)) for source,relative in bindings['source_to_restore'].items()})
+        if config.get('runtime_environment'):
+            from .lean_recovery import ENVIRONMENT_PATHS
+            for name,value in config['runtime_environment'].items():
+                if name in ENVIRONMENT_PATHS and value and (not bindings or name not in bindings['environment']):
+                    raise PipelineError('Checkpoint runtime dependency has no recovery binding: '+name)
+        if config.get('compatibility') is not None:
+            profile=destination/'dependencies/compatibility/trust.json'
+            if not profile.is_file() or file_hash(profile)!=config['compatibility'].get('profile_sha256'):
+                raise PipelineError('Restored compatibility profile checksum mismatch')
+            config['compatibility']={**config['compatibility'],'profile_path':str(profile)}
         atomic_json(destination/'config.restored.json',config)
         if manifest.get('release_id'):
             new_path=destination/'releases'/manifest['release_id']
@@ -130,8 +141,10 @@ def _asset_inventory(cfg,main):
     from .store import current
     state=Path(cfg['state_dir']);release=current(main)
     code=Path(__file__).parent.parent;assets={}
-    for p in (code/'study2').glob('*.py'):assets['code/study2/'+p.name]=p
-    for name in ['dashboard.py','requirements.lock.txt','pyproject.toml']:
+    for p in (code/'study2').rglob('*'):
+        if p.is_file() and p.suffix in {'.py','.js','.mjs','.css'}:
+            assets[str(Path('code/study2')/p.relative_to(code/'study2'))]=p
+    for name in ['dashboard.py','local_update_entry.py','requirements.lock.txt','pyproject.toml']:
         if (code/name).is_file():assets['code/'+name]=code/name
     if (code/'study2/assets/review_template.xlsx').is_file():
         assets['code/study2/assets/review_template.xlsx']=code/'study2/assets/review_template.xlsx'
@@ -153,6 +166,15 @@ def _asset_inventory(cfg,main):
             if p.is_file() and not p.is_symlink() and p.name not in {'backup.sqlite','backup.sqlite.gz','backup.retention.json'}:
                 relative=Path('releases')/release['release_id']/p.relative_to(release_path)
                 assets[str(relative)]=p
+    compatibility=cfg.get('compatibility')
+    if compatibility is not None:
+        if not isinstance(compatibility,dict) or set(compatibility)!={'profile_path','profile_sha256'}:
+            raise PipelineError('Checkpoint compatibility requires a pinned local profile')
+        profile=Path(compatibility['profile_path'])
+        if (not profile.is_absolute() or any(p.is_symlink() for p in (profile,*profile.parents))
+            or not profile.is_file() or file_hash(profile)!=compatibility['profile_sha256']):
+            raise PipelineError('Checkpoint compatibility profile checksum or path mismatch')
+        assets['dependencies/compatibility/trust.json']=profile
     from .lean_recovery import enabled, recovery_assets
     if enabled(cfg):
         for name,p in recovery_assets(cfg).items():
@@ -175,8 +197,28 @@ def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,o
     from .lean_recovery import enabled, recovery_bindings
     lean=enabled(cfg)
     object_root=Path(cfg['state_dir'])/'artifact_objects' if lean else None
-    if lean:
-        manifest['recovery_bindings']=recovery_bindings(cfg,assets)
+    if lean or cfg.get('runtime_environment'):
+        from .lean_recovery import ENVIRONMENT_PATHS
+        bindings=recovery_bindings(cfg,assets) if lean else {
+            'environment':{},'source_to_restore':{str(Path(p).resolve()):name for name,p in assets.items()},
+            'external_dependencies':[]}
+        configured=cfg.get('runtime_environment',{})
+        if not isinstance(configured,dict) or not set(configured).issubset(ENVIRONMENT_PATHS):
+            raise PipelineError('Checkpoint runtime environment contains unsupported names')
+        for name,value in configured.items():
+            if not isinstance(value,str):raise PipelineError('Checkpoint runtime environment requires string paths')
+            value=os.environ.get(name,value)
+            if not value:continue
+            source=Path(value).expanduser().resolve()
+            if name=='STUDY2_REVIEW_STATE_DIR':
+                if source!=Path(cfg['state_dir']).resolve():
+                    raise PipelineError('Checkpoint runtime environment uses a different state')
+                bindings['environment'][name]='.'
+            else:
+                relative=bindings['source_to_restore'].get(str(source))
+                if relative is None:raise PipelineError('Checkpoint runtime dependency is not captured: '+name)
+                bindings['environment'][name]=relative
+        manifest['recovery_bindings']=bindings
     for name,p in assets.items():
         relative=Path(name)
         archive_name=name+'.gz' if relative.parts[0]=='releases' and p.suffix=='.jsonl' else name

@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import uuid
 
@@ -27,6 +28,7 @@ from .common import digest, file_hash, utcnow
 from .group_cleaning import (PolicyError, need, make_proposal, validate_proposal,
     exclusion_manifest, combined_manifest, project_workload)
 from .group_cleaning import implementation_revision
+from .continuity_integration import bound_proposal, validate_bound, guard_transition, check_generation
 from .manual_flags import (Inventory, initialize_registry, seed_manifest,
     export_manifest, decide_flags, status as registry_status)
 from .review import active_decisions
@@ -38,7 +40,7 @@ GEN_FORMAT='study2_group_cleaning_generation_v1'
 REVIEW_FORMAT='study2_group_cleaning_acceptance_v1'
 REQUIRED_FILES={'config','records','cases','groups','decisions','eric_manifest',
                 'source_evidence','authorization','partitions','user_exclusions'}
-OPTIONAL_FILES={'analysis','parents','prior_policy_manifest','carry'}
+OPTIONAL_FILES={'analysis','parents','prior_policy_manifest','carry','continuity','intent_origin'}
 
 
 def _json(path):
@@ -52,7 +54,7 @@ def _read_file(pin):
     return p,data
 
 
-def load_bundle(path):
+def _load_bundle(path, *, historical_active=None):
     b=_json(path)
     need(set(b)=={'format','release_id','main_revision','rules_hash','files','revision'} and
          b['format']==BUNDLE_FORMAT,'input_bundle_shape')
@@ -72,7 +74,16 @@ def load_bundle(path):
             need(len(rows)==len(data[name]),'duplicate_input_identity')
         need(isinstance(data[name],dict) and all(k==r[key] for k,r in data[name].items()),'input_identity_index')
     need(isinstance(data['groups'],dict),'group_index_required')
-    need(current_rules_hash(data['config'])==b['rules_hash'],'scientific_rules_hash_changed')
+    if historical_active is None:
+        need(current_rules_hash(data['config'])==b['rules_hash'],'scientific_rules_hash_changed')
+    else:
+        # Historical evidence is authenticated against its accepted generation,
+        # not reinterpreted under today's rule implementation. Target loaders
+        # never use this branch; full source view/authority checks follow below.
+        prior=historical_active.get('proposal') or {}
+        need(all(b[k]==prior.get('base',{}).get(k)
+                 for k in ('release_id','main_revision','rules_hash')),
+             'intent_origin_inputs_changed')
     options={k:b[k] for k in ('release_id','main_revision','rules_hash')}
     options.update({k:data[k] for k in ('eric_manifest','source_evidence','authorization','partitions','user_exclusions')})
     if 'prior_policy_manifest' in data:options['prior_policy_manifest']=data['prior_policy_manifest']
@@ -83,8 +94,22 @@ def load_bundle(path):
         options.update(prior_policy_manifest=c['recompiled_manifest'],
                        prior_policy_origin_revision=c['old_policy_manifest_revision'],
                        prior_policy_head=c['old_pointer']['manifest_sha256'])
+        if 'decision_intents' in c:
+            from .group_decision_intents import validate
+            options['decision_intents']=validate(c['decision_intents'])
     data['_input_pins']=deepcopy(b['files'])
+    data['_proposal_options']=deepcopy(options)
     return b,data,options
+
+
+def load_bundle(path):
+    return _load_bundle(path)
+
+
+def _load_intent_source(path, active):
+    result=_load_bundle(path,historical_active=active)
+    _migrate_active_intents(active,result[1])
+    return result
 
 
 def _main_revision(cfg):
@@ -108,12 +133,11 @@ def _writer_control(state):
     It is invoked only by reviewed operator apply/undo, never by pure preview.
     """
     state=Path(state);need(state.is_dir() and not state.is_symlink(),'writer_state_directory')
-    path=state/'writer.lock';need(not path.is_symlink(),'writer_lock_symlink')
-    with path.open('a') as lock:
-        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise PolicyError('existing_writer_busy') from None
-        try:yield
-        finally:fcntl.flock(lock,fcntl.LOCK_UN)
+    from .owned_locks import exclusive
+    with exclusive(state/'writer.lock'):
+        from .coordinated_update import require_available
+        require_available(state)
+        yield
 
 
 @contextmanager
@@ -158,7 +182,8 @@ def _control_root(root):
         need(root.is_dir(),'control_root_directory')
         allowed=lambda n:n in {'CURRENT.json','writer.lock'} or bool(re.fullmatch(
             r'gen_[0-9a-f]{32}|CURRENT\.pending\.[0-9a-f]{32}\.json',n))
-        need(all(allowed(p.name) for p in root.iterdir()),'foreign_control_directory')
+        from .lean_recovery import finder_metadata
+        need(all(allowed(p.name) or finder_metadata(p) for p in root.iterdir()),'foreign_control_directory')
     return root
 
 
@@ -180,18 +205,33 @@ def _load_generation(root,pointer):
     manifest=_json(folder/'MANIFEST.json')
     need(set(manifest)=={'format','files'} and manifest['format']==GEN_FORMAT,'generation_manifest_shape')
     required={'policy.json','policy-flags.sqlite','policy-manifest.json','combined-manifest.json','receipt.json','proposal.json','eric-reference.json','before-pointer.json'}
-    need(set(manifest['files'])==required,'generation_files_shape')
+    continuity_name='historical-continuity.json'
+    has_continuity=continuity_name in manifest['files']
+    need(set(manifest['files'])==required|({continuity_name} if has_continuity else set()),'generation_files_shape')
     for name,h in manifest['files'].items():
         q=folder/name;need(q.is_file() and not q.is_symlink() and file_hash(q)==h,'generation_file_changed')
     registry_status(folder/'policy-flags.sqlite')  # Existing strict ledger validation.
-    return dict(pointer=pointer,folder=folder,policy=_json(folder/'policy.json'),
+    result=dict(pointer=pointer,folder=folder,policy=_json(folder/'policy.json'),
                 proposal=_json(folder/'proposal.json'),receipt=_json(folder/'receipt.json'),
                 policy_manifest=_json(folder/'policy-manifest.json'),combined_manifest=_json(folder/'combined-manifest.json'))
+    need(has_continuity == bool(result['policy'].get('historical_continuity_revision')),
+         'continuity_generation_file_required')
+    if has_continuity:
+        need(isinstance(result['proposal'],dict) and
+             _json(folder/continuity_name)==result['proposal'].get('historical_continuity'),
+             'continuity_generation_file_changed')
+    check_generation(result['policy'],result['proposal'],result['receipt'])
+    if result['proposal'] and 'decision_intents' in result['proposal']:
+        from .group_decision_intents import validate
+        intents=validate(result['proposal']['decision_intents'])
+        need(result['policy'].get('decision_intent_revision')==intents['revision'],
+             'generation_decision_intent_changed')
+    return result
 
 
 def preview(bundle_path):
     _,d,options=load_bundle(bundle_path)
-    return make_proposal(d['records'],d['cases'],d['groups'],d['decisions'],**options)
+    return bound_proposal(d,options)
 
 
 def _review(path,proposal):
@@ -204,9 +244,11 @@ def _review(path,proposal):
     return review
 
 
-def _stage(root,current,proposal,data,receipt,*,restore=None,fault=None):
+def _stage(root,current,proposal,data,receipt,*,restore=None,fault=None,commit_pointer=True,guard_base=None):
     """Create all resources privately, then commit one pointer; retain failures."""
     fault=fault or (lambda phase:None)
+    if proposal is not None:validate_bound(proposal,data,data['_proposal_options'])
+    guard_transition(current,proposal,receipt['release_id'],data=data)
     generation=root/('gen_'+uuid.uuid4().hex);generation.mkdir(mode=0o700)
     _write_new(generation/'before-pointer.json',current['pointer'] if current else None)
     fault('after_before_backup')
@@ -242,9 +284,14 @@ def _stage(root,current,proposal,data,receipt,*,restore=None,fault=None):
     _write_new(generation/'combined-manifest.json',combined)
     _write_new(generation/'eric-reference.json',data['eric_manifest'])
     _write_new(generation/'proposal.json',proposal)
-    _write_new(generation/'policy.json',dict(format='study2_group_policy_control_v1',proposal_revision=proposal['revision'] if proposal else None,
+    policy=dict(format='study2_group_policy_control_v1',proposal_revision=proposal['revision'] if proposal else None,
         release_id=release,inventory_revision=inventory.revision,main_revision=receipt['main_revision'],
-        policy_active=proposal is not None,partitions=proposal['partitions'] if proposal else {}))
+        policy_active=proposal is not None,partitions=proposal['partitions'] if proposal else {})
+    if proposal and proposal.get('historical_continuity'):
+        policy['historical_continuity_revision']=proposal['historical_continuity']['revision']
+    if proposal and 'decision_intents' in proposal:
+        policy['decision_intent_revision']=proposal['decision_intents']['revision']
+    _write_new(generation/'policy.json',policy)
     receipt.update(generation=generation.name,previous_pointer=current['pointer'] if current else None,
                    before_backup_generation=current['pointer']['generation'] if current else None,
                    after_backup_generation=generation.name,
@@ -253,22 +300,30 @@ def _stage(root,current,proposal,data,receipt,*,restore=None,fault=None):
     _write_new(generation/'receipt.json',receipt)
     files={n:file_hash(generation/n) for n in ('before-pointer.json','policy.json','policy-flags.sqlite','policy-manifest.json',
         'combined-manifest.json','receipt.json','proposal.json','eric-reference.json')}
+    if proposal and proposal.get('historical_continuity'):
+        _write_new(generation/'historical-continuity.json',proposal['historical_continuity'])
+        files['historical-continuity.json']=file_hash(generation/'historical-continuity.json')
     _write_new(generation/'MANIFEST.json',dict(format=GEN_FORMAT,files=files))
     fault('after_complete_backup')
     pointer=dict(format=POINTER_FORMAT,generation=generation.name,manifest_sha256=file_hash(generation/'MANIFEST.json'))
     # Source controls cannot change while the existing writer lock is held.
-    _guard_live(data,dict(main_revision=receipt['main_revision'],release_id=receipt['release_id'],
+    _guard_live(data,guard_base or dict(main_revision=receipt['main_revision'],release_id=receipt['release_id'],
                           rules_hash=receipt['rules_hash']))
-    if proposal:need(implementation_revision()==proposal['base']['implementation_revision'],'policy_implementation_changed_during_apply')
-    _pointer(root,pointer)
-    fault('after_pointer_commit')
-    return read_active(root)
+    if proposal:
+        validate_bound(proposal,data,data['_proposal_options'])
+        need(implementation_revision()==proposal['base']['implementation_revision'],'policy_implementation_changed_during_apply')
+    guard_transition(current,proposal,receipt['release_id'],data=data)
+    if commit_pointer:
+        _pointer(root,pointer)
+        fault('after_pointer_commit')
+        return read_active(root)
+    return _load_generation(root,pointer)
 
 
 def apply(root,bundle_path,proposal_path,review_path,*,operator,reason,fault=None):
     need(isinstance(operator,str) and operator.strip() and isinstance(reason,str) and reason.strip(),'operator_reason_required')
     _,d,options=load_bundle(bundle_path);proposal=_json(proposal_path)
-    validate_proposal(proposal,d['records'],d['cases'],d['groups'],d['decisions'],**options)
+    validate_bound(proposal,d,options)
     review=_review(review_path,proposal)
     op_id=sha(['apply',proposal['revision'],sha(review)])
     root=_control_root(root)
@@ -280,6 +335,7 @@ def apply(root,bundle_path,proposal_path,review_path,*,operator,reason,fault=Non
             current=read_active(root)
             if current and current['receipt']['operation_id']==op_id:
                 return dict(status='applied',idempotent=True,pointer=current['pointer'])
+            guard_transition(current,proposal,options['release_id'],data=d)
             prior=current['policy_manifest']['revision'] if current and current['policy']['policy_active'] else None
             if 'carry' in d:
                 need(current is not None and d['carry']==_carry_from_active(current,d,options),'carry_head_or_target_drift')
@@ -303,6 +359,7 @@ def undo(root,bundle_path,*,expected_head,operator,reason,fault=None):
         with _writer_control(root):
             current=read_active(root);need(current is not None,'no_active_policy_control')
             if current['receipt']['operation_id']==op_id:return dict(status='undone',idempotent=True,pointer=current['pointer'])
+            need(not current['policy'].get('historical_continuity_revision'), 'continuity_undo_requires_reviewed_transition')
             need(current['pointer']['manifest_sha256']==expected_head,'undo_head_changed')
             prev=current['receipt']['previous_pointer']
             restored=None
@@ -345,12 +402,13 @@ def _local_snapshot_locked(bundle_path,root,*,include_cases=False):
     _guard_live(d,options)
     rows=list(d['records'].values());eric=validate_manifest(d['eric_manifest'],rows,options['release_id'])
     if active and active['proposal']:
-        validate_proposal(active['proposal'],d['records'],d['cases'],d['groups'],d['decisions'],**options)
+        validate_bound(active['proposal'],d,options)
         excluded=validate_manifest(active['combined_manifest'],rows,options['release_id'])
         policy_ids=validate_manifest(active['policy_manifest'],rows,options['release_id'])
         need(excluded==eric|policy_ids,'combined_flag_union_mismatch')
         projection=project_workload(d['records'],d['cases'],d['groups'],d['decisions'],excluded=excluded,
-                                    partitions=active['proposal']['partitions'])
+                                    partitions=active['proposal']['partitions'],
+                                    intent_application=active['proposal'].get('decision_application'))
         status='applied_local_policy'
     else:
         # OFF/undone does not apply generic closures merely because a classifier
@@ -368,6 +426,9 @@ def _local_snapshot_locked(bundle_path,root,*,include_cases=False):
             child_groups_pending=projection['counts']['similarity_scopes'],
             awaiting_evidence_groups=projection['counts']['held_scopes'],
             awaiting_evidence_work=projection['counts']['held_scopes']+len(projection['adult_comparison_ids']))
+        if 'intent_holds' in projection:
+            result['decision_intent_holds']=deepcopy(projection['intent_holds'])
+            result['decision_intent_review_required']=bool(projection['intent_holds'])
         if include_cases:result['projection']=projection
     if 'analysis' in d:
         parents=d.get('parents')
@@ -400,8 +461,119 @@ def _carry_from_active(active,data,options):
            registry_sha256=file_hash(active['folder']/'policy-flags.sqlite'),
            target_release_id=options['release_id'],target_inventory_revision=inventory.revision,
            active_pins=sorted(old,key=lambda p:p['submission_id']),recompiled_manifest=m)
+    if 'intent_origin' in data:
+        origin=data['intent_origin']
+        need(isinstance(origin,dict) and set(origin)=={'source_bundle_pin'},'intent_origin_shape')
+        source_path,_=_read_file(origin['source_bundle_pin'])
+        _,source,_=_load_intent_source(source_path,active)
+        _read_file(origin['source_bundle_pin'])
+        c['decision_intents']=_migrate_active_intents(active,source)
+    elif 'decision_intents' in active['proposal']:
+        need(not active['proposal']['partitions'],'unmigrated_partitions_require_source_origin')
+        c['decision_intents']=deepcopy(active['proposal']['decision_intents'])
     c['revision']=sha(c)
     return c
+
+
+def _migrate_active_intents(active,source):
+    """The old generation and pinned source view jointly authorise migration."""
+    from .group_decision_intents import migrate,validate,sealed,FORMAT
+    proposal=active['proposal']
+    need(isinstance(proposal,dict),'intent_origin_proposal_required')
+    base=proposal['base']
+    options=source['_proposal_options'];receipt=active['receipt'];control=active['policy']
+    need(control['policy_active'] and control['proposal_revision']==proposal['revision'] and
+         receipt['proposal_revision']==proposal['revision'] and
+         receipt['release_id']==control['release_id']==base['release_id'],
+         'intent_origin_generation_binding')
+    need(all(base[k]==options[k] for k in ('release_id','main_revision','rules_hash')) and
+         base['eric_revision']==source['eric_manifest']['revision'] and
+         base['view_revision']==sha({k:source[k] for k in ('records','cases','groups','decisions')}) and
+         base['inventory_revision']==inventory_revision(list(source['records'].values())) and
+         proposal['partitions']==source['partitions'] and proposal['authorization']==source['authorization'],
+         'intent_origin_inputs_changed')
+    migrated=migrate(proposal,source['records'],source['cases'],source['groups'],receipt)
+    if 'decision_intents' not in proposal:
+        return migrated
+    prior=validate(proposal['decision_intents'])
+    merged={x['decision_id']:x for x in prior['intents']}
+    for item in migrated['intents']:
+        need(item['decision_id'] not in merged or merged[item['decision_id']]==item,
+             'existing_intent_cannot_be_overwritten')
+        merged[item['decision_id']]=item
+    return validate(sealed({'format':FORMAT,'intents':[merged[k] for k in sorted(merged)]}))
+
+
+def _external_preview_path(output_dir,protected):
+    """Reject symlink ancestors and known directory aliases before write-new."""
+    requested=Path(output_dir).absolute()
+    identities={(p.stat().st_dev,p.stat().st_ino) for p in protected}
+    for parent in [requested,*requested.parents]:
+        try:info=parent.lstat()
+        except FileNotFoundError:continue
+        need(not stat.S_ISLNK(info.st_mode),'intent_preview_symlink_ancestor')
+        need((info.st_dev,info.st_ino) not in identities,'intent_preview_protected_directory')
+    output=requested.resolve(strict=False)
+    need(not output.exists() and all(not output.is_relative_to(p.resolve()) for p in protected),
+         'intent_preview_requires_new_external_directory')
+    return output
+
+
+def _intent_partition_inputs(release_id,data):
+    """Keep a reviewed legacy profile's exact input until its native proof passes."""
+    from .continuity_integration import PROFILES
+    if release_id in PROFILES:
+        need('continuity' in data,'continuity_evidence_required')
+        return deepcopy(data['partitions']),deepcopy(data['authorization'])
+    return {},{**data['authorization'],'partition_groups':[]}
+
+
+def prepare_intent_bundle(source_bundle_path,target_bundle_path,root,output_dir):
+    """Explicit isolated migration/preview. No state writer or activation is called.
+
+    Record/source payloads remain pinned references. Only small proposed control
+    inputs and the proposal are written to a new caller-selected directory.
+    """
+    source_bundle_path=Path(source_bundle_path).absolute()
+    source_pin={'path':str(source_bundle_path),'sha256':file_hash(source_bundle_path)}
+    bundle,data,options=load_bundle(target_bundle_path)
+    with _reader_control(data['config']['state_dir']),_reader_control(root):
+        active=read_active(root)
+        need(active is not None,'no_policy_control_to_carry')
+        _,source,_=_load_intent_source(source_bundle_path,active)
+        intents=_migrate_active_intents(active,source)
+        protected=[Path(source['config']['state_dir']).resolve(),
+                   Path(data['config']['state_dir']).resolve(),Path(root).resolve()]
+        output=_external_preview_path(output_dir,protected)
+        origin={'source_bundle_pin':source_pin}
+        proposed_data={**data,'intent_origin':origin}
+        carry=_carry_from_active(active,proposed_data,options)
+        need(carry['decision_intents']==intents,'intent_migration_changed')
+        # Old authorisation survives verbatim in each intent. No generated target
+        # group is presented as a fresh partition instruction.
+        partitions,authorization=_intent_partition_inputs(bundle['release_id'],data)
+        output.mkdir(parents=True,mode=0o700)
+        need(output.resolve()==output and not output.is_symlink(),'intent_preview_directory_changed')
+        files=deepcopy(bundle['files'])
+        files.pop('prior_policy_manifest',None)
+        for name,value in [('intent_origin',origin),('carry',carry),('partitions',partitions),('authorization',authorization)]:
+            path=output/(name+'.json');_write_new(path,value)
+            files[name]={'path':str(path),'sha256':file_hash(path)}
+        proposed={**bundle,'files':files}
+        proposed['revision']=sha({k:v for k,v in proposed.items() if k!='revision'})
+        path=output/'bundle.json';_write_new(path,proposed)
+        proposal=preview(path);_write_new(output/'proposal.json',proposal)
+        from .group_intent_review import review_html,review_model
+        model=review_model(proposal)
+        review_path=output/'review.html'
+        with review_path.open('x',encoding='utf-8') as handle:handle.write(review_html(proposal))
+        review_path.chmod(0o600)
+        return dict(status='proposed_not_applied',bundle=str(path),proposal=str(output/'proposal.json'),
+                    review=str(review_path),pending_decision_intents=model['pending_intents'],
+                    burst_hold_scopes=model['burst_review']['scope_count'],
+                    burst_hold_submission_records=model['burst_review']['distinct_submission_count'],
+                    decision_intent_revision=intents['revision'],
+                    decision_application=proposal['decision_application'],production_publication_changed=False)
 
 
 def carry_preview(bundle_path,root):
@@ -428,7 +600,15 @@ def main():
         elif a.command=='undo':r=undo(a.control_root,a.bundle,expected_head=a.expected_head,operator=a.operator,reason=a.reason)
         else:r=local_snapshot(a.bundle,a.control_root,include_cases=a.command=='project')
         if a.output:_write_new(a.output,r)
-        print(json.dumps({k:r[k] for k in ('status','revision','idempotent','flag_counts','production_publication_changed') if k in r},sort_keys=True))
+        summary={k:r[k] for k in ('status','revision','idempotent','flag_counts','production_publication_changed') if k in r}
+        if a.command=='dry-run' and 'decision_intents' in r:
+            from .group_intent_review import review_model
+            model=review_model(r)
+            summary['candidate_group_decisions']=model['rows']
+            summary['pending_decision_intents']=model['pending_intents']
+            burst=model['burst_review']
+            summary['burst_hold_review']={k:burst[k] for k in ('scope_count','distinct_submission_count','rows')}
+        print(json.dumps(summary,sort_keys=True))
         return 0
     except (PolicyError,OSError,ValueError,sqlite3.Error):
         print('{"status":"blocked","code":"group_policy_operation_requires_inspection"}',file=sys.stderr);return 1

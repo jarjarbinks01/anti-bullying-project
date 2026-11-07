@@ -14,6 +14,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from study2.common import file_hash
+from study2.english_ui import english
 from study2.parent_panel import ADULT, CHILD
 from study2.parent_panel_context import (DETAIL_METRIC_LABELS, DETAIL_TITLE, OVERVIEW_LABEL,
                                           STATISTICS_TITLE, UNLIMITED, PanelDetailFacts,
@@ -231,12 +232,12 @@ def test_case_c_same_adult_branch_offers_only_paired_and_keeps_unconfirmed_out(r
     app.selectbox(key='ipp_cohort_' + CHILD).set_value('全部獨立基線及追蹤').run()
     app.selectbox(key='ipp_branch').set_value(ADULT).run()
     assert not app.exception
-    assert app.selectbox(key='ipp_cohort_' + ADULT).options == ['跨期樣本']
-    assert '同一成人分支只提供跨期樣本，已清除全部基線選項。' in text_of(app)
+    assert app.selectbox(key='ipp_cohort_' + ADULT).options == [english('跨期樣本')]
+    assert english('同一成人分支只提供跨期樣本，已清除全部基線選項。') in text_of(app)
     assert '統計樣本 T0 N：1；T1 N：1' in statistics_text(app)
     pairs = app.dataframe[0].value
-    assert 'p_g2_t0' not in set(pairs['獨立T0提交ID']) | set(pairs['獨立T1提交ID'])
-    assert 'p_g1_t0' in set(pairs['獨立T0提交ID'])
+    assert 'p_g2_t0' not in set(pairs[english('獨立T0提交ID')]) | set(pairs[english('獨立T1提交ID')])
+    assert 'p_g1_t0' in set(pairs[english('獨立T0提交ID')])
 
 
 def test_case_d_applied_conditions_are_shown_and_change_the_statistics_n(release):
@@ -278,7 +279,7 @@ def test_case_f_trend_reading_marks_the_summary_as_before_date_filter(release):
     assert 'ipp_trend_waves' in keys and 'ipp_trend_interval' in keys
     assert app.selectbox(key='ipp_wave').value == 'T0'
     assert app.date_input
-    assert '期間內' in '\n'.join(metric.label for metric in app.metric)
+    assert english('期間內 ') in '\n'.join(metric.label for metric in app.metric)
 
 
 def test_case_g_blocked_combination_is_still_blocked(release):
@@ -288,7 +289,7 @@ def test_case_g_blocked_combination_is_still_blocked(release):
     app.radio(key='ipp_reading').set_value('跨期比較').run()
     assert not app.exception
     body = text_of(app)
-    assert '全部基線及追蹤不等於完整跨期樣本' in body
+    assert english('全部基線及追蹤不等於完整跨期樣本。請先把「獨立家長分析範圍」明確選為跨期樣本，再核對新 N。') in body
     assert '分析範圍：全部獨立基線及追蹤' in body
 
 
@@ -301,15 +302,15 @@ def test_case_g_capability_shortfall_still_blocks_the_workbench(release):
     app.radio(key='ipp_reading').set_value('跨期比較').run()
     assert not app.exception
     body = text_of(app)
-    assert '此發布未提供跨期探索能力' in body
-    assert '獨立家長描述統計' in body
+    assert english('此發布未提供跨期探索能力；研究總覽仍可閱讀。') in body
+    assert english('獨立家長描述統計') in body
 
 
 def test_case_h_legacy_release_keeps_the_existing_entry(release):
     folder, summary = release
     app = panel_app(folder, {k: v for k, v in summary.items() if k != 'independent_parent'})
     assert not app.exception
-    assert '此歷史版本未包含獨立家長分析。' in text_of(app)
+    assert english('此歷史版本未包含獨立家長分析。') in text_of(app)
     assert not app.metric
 
 
@@ -318,7 +319,7 @@ def test_case_h_legacy_statistics_entry_adds_no_two_wave_n(release):
     app = panel_app(folder, {**summary, 'descriptive': None})
     assert not app.exception
     body = text_of(app)
-    assert '此歷史版本未包含新版人口特徵' in body
+    assert english('此歷史版本未包含新版人口特徵，未提供時段趨勢；以下沿用舊量表摘要。') in body
     assert '統計樣本 T0 N' not in body
     assert STATISTICS_TITLE not in body
 
@@ -336,7 +337,8 @@ def test_case_i_metric_count_is_unchanged(release):
     app = panel_app(folder, summary)
     assert not app.exception
     assert len(app.metric) == 6
-    assert [m.label for m in app.metric[:3]] == ['獨立家長基線', '同一孩子跨期（可換填卷人）', '同一成人跨期']
+    assert [m.label for m in app.metric[:3]] == [english(label) for label in
+        ['獨立家長基線', '同一孩子跨期（可換填卷人）', '同一成人跨期']]
     assert [m.label for m in app.metric[3:6]] == list(DETAIL_METRIC_LABELS)
 
 
@@ -364,6 +366,6 @@ def test_case_j_exports_and_statistics_receive_the_same_data(release, monkeypatc
     assert set(rows['submission_id']) == {'p_g1_t0', 'p_g1_t1', 'p_g2_t0', 'p_g2_t1'}
     assert 'p_g3_t0' not in set(rows['submission_id'])
     labels = [button.label for button in app.download_button]
-    assert '下載獨立家長配對明細' in labels
-    assert '下載目前獨立家長選定回應' in labels
+    assert english('下載獨立家長配對明細') in labels
+    assert english('下載目前獨立家長選定回應') in labels
     assert len(app.dataframe[0].value) == 2

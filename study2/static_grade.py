@@ -10,8 +10,8 @@ import pandas as pd
 
 from .common import PipelineError, plain
 from .descriptive_data import attach_measurements
-from .descriptive_spec import VERSION, DICTIONARY_VERSION, variables
-from .descriptives import group_rows, values_and_status
+from .presentation.descriptive_spec import VERSION, DICTIONARY_VERSION, variables
+from .presentation.descriptives import group_rows, values_and_status
 from .descriptive_exploration import _validate_pairs
 
 FORMAT='study2_descriptive_grade_v1'

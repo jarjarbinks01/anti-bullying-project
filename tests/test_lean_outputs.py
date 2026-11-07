@@ -1,5 +1,4 @@
 import copy
-import importlib.util
 import io
 import json
 import shutil
@@ -175,15 +174,15 @@ def cells(data):
     book.close();return values
 
 
-def test_prepared_cohorts_and_on_demand_reports_equal_prior_eager_results(publication):
+def test_prepared_deferred_reports_equal_unprepared_eager_results(publication):
     root,folder,result,_=publication
-    # Compare shared prepared cohorts with the retained unshared eager path.
-    old=reports
+    # Exercise the independent unprepared/eager path against prepared/deferred
+    # publication, without relying on a developer's historical checkout.
     target=root/'baseline'/folder.name;target.mkdir(parents=True)
     measurements=pd.read_parquet(folder/'descriptive_measurements.parquet')
     frame=pd.read_parquet(folder/'analysis.parquet')
     parents=pd.read_parquet(folder/'parent_longitudinal.parquet') if (folder/'parent_longitudinal.parquet').exists() else None
-    old.write_reports(target,measurements,frame,parents,folder.name)
+    reports.write_reports(target,measurements,frame,parents,folder.name, formatted=True, prepared=None)
     for name in ('descriptive_statistics.parquet','descriptive_changes.parquet'):
         pd.testing.assert_frame_equal(pd.read_parquet(folder/name),pd.read_parquet(target/name))
     before=(folder/'descriptive_manifest.json').read_bytes()
@@ -265,15 +264,15 @@ def test_deferred_ui_is_explicit_on_demand_and_never_substitutes_off_for_on():
         assert len(downloads)==1 and downloads[0][2].startswith('OFF-reference-')
 
 
-def test_exploration_tables_equal_previous_unshared_cohorts(publication,tmp_path):
+def test_prepared_exploration_tables_equal_unprepared_cohorts(publication,tmp_path):
     _,folder,_,_=publication
-    from study2 import descriptive_exploration_outputs as old
+    from study2 import descriptive_exploration_outputs as exploration
     target=tmp_path/folder.name;target.mkdir()
     panel=folder/'independent_parent_analysis.parquet'
     if panel.exists():shutil.copy2(panel,target/panel.name)
     measurements=pd.read_parquet(folder/'descriptive_measurements.parquet')
     frame=pd.read_parquet(folder/'analysis.parquet')
     parents=pd.read_parquet(folder/'parent_longitudinal.parquet') if (folder/'parent_longitudinal.parquet').exists() else None
-    old.write_exploration(target,measurements,frame,parents,folder.name)
-    for name in old.FILES.values():
+    exploration.write_exploration(target,measurements,frame,parents,folder.name, prepared=None)
+    for name in exploration.FILES.values():
         pd.testing.assert_frame_equal(pd.read_parquet(folder/name),pd.read_parquet(target/name))

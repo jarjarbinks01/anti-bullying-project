@@ -7,10 +7,11 @@ it neither discovers private controls nor calculates scientific memberships.
 from copy import deepcopy
 import re
 
-from .analysis_eligibility import sha, validate_manifest
+from .presentation.analysis_eligibility import sha, validate_manifest
 from .common import PipelineError
 
 FORMAT = 'study2_dashboard_release_context_v1'
+CANDIDATE_FORMAT = 'study2_candidate_release_context_v1'
 FIELDS = {'format', 'release_id', 'run_id', 'run_fingerprint', 'program_hash',
           'group_control_head', 'group_proposal_revision', 'group_implementation_revision',
           'review_control_revision', 'flags', 'workload', 'revision'}
@@ -36,7 +37,8 @@ def _hash(value):
 def validate_release_context(value, *, public=False):
     _need(isinstance(value, dict) and set(value) == FIELDS | (PUBLIC_EXTRA if public else set()),
           'unsupported_fields')
-    _need(value['format'] == FORMAT, 'unsupported_format')
+    candidate = value['format'] == CANDIDATE_FORMAT
+    _need(value['format'] in {FORMAT, CANDIDATE_FORMAT}, 'unsupported_format')
     for key in ('release_id', 'run_id'):
         token = value[key]
         _need(isinstance(token, str) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{0,95}', token)
@@ -48,17 +50,19 @@ def validate_release_context(value, *, public=False):
     _need(isinstance(workload, dict) and set(workload) == WORK_FIELDS, 'invalid_workload_fields')
     _need(all(type(v) is int and 0 <= v <= 2**53-1 for k, v in flags.items()
               if k not in {'manifest_revision', 'inventory_revision'}) and
-          all(type(v) is int and 0 <= v <= 2**53-1 for v in workload.values()), 'invalid_aggregate_count')
+          all((candidate and k == 'correction_bundles' and v is None) or
+              (type(v) is int and 0 <= v <= 2**53-1) for k,v in workload.items()), 'invalid_aggregate_count')
     _need(flags['overlap_records'] <= min(flags['eric_records'], flags['group_records']) and
           flags['combined_records'] == flags['eric_records'] + flags['group_records'] - flags['overlap_records'],
           'flag_union_mismatch')
     _need(workload['child_groups'] == workload['phone_groups'] + workload['held_groups'] and
-          workload['correction_bundles'] <= workload['correction_comparisons'], 'workload_units_mismatch')
+          (candidate and workload['correction_bundles'] is None or
+           workload['correction_bundles'] <= workload['correction_comparisons']), 'workload_units_mismatch')
     body = {k: value[k] for k in FIELDS if k != 'revision'}
     _need(value['revision'] == sha(body), 'revision_mismatch')
     if public:
         _need(value['default_eligibility'] in {'off', 'on'} and
-              value['workload_scope'] == 'release_wide_applied_controls' and
+              value['workload_scope'] == ('candidate_controls_unapplied' if candidate else 'release_wide_applied_controls') and
               _hash(value['export_program_hash']), 'invalid_public_context')
     return value
 
@@ -71,14 +75,16 @@ def bind_release_context(value, release, summary, run_fingerprint, records, mani
           value['run_id'] == release['run_id'] and value['run_fingerprint'] == run_fingerprint and
           value['program_hash'] == summary.get('program_hash'), 'selected_run_mismatch')
     _need(manifest is not None, 'accepted_composed_manifest_required')
+    _need((value['format']==CANDIDATE_FORMAT) ==
+          (manifest.get('format')=='study2_candidate_exclusion_manifest_v1'), 'candidate_manifest_context_mismatch')
     excluded = validate_manifest(manifest, records, release['release_id'])
     flags = value['flags']
     _need(flags['manifest_revision'] == manifest['revision'] and
           flags['inventory_revision'] == manifest['inventory_revision'] and
           flags['combined_records'] == len(excluded), 'accepted_manifest_mismatch')
-    from .runner import program_hash
+    from .controls_capture import code_revision as program_hash
     result = deepcopy(value)
-    result.update(default_eligibility=default_eligibility, workload_scope='release_wide_applied_controls',
+    result.update(default_eligibility=default_eligibility, workload_scope=('candidate_controls_unapplied' if value['format']==CANDIDATE_FORMAT else 'release_wide_applied_controls'),
                   export_program_hash=program_hash())
     validate_release_context(result, public=True)
     return result

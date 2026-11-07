@@ -70,9 +70,13 @@ def validate_summary(value, *, release_id, decision_revision, exclusion_revision
     return native_rows
 
 
-def load_summary(*, release_id, decision_revision, exclusion_revision=None):
+def load_summary(*, release_id, decision_revision, exclusion_revision=None, path=None, review_state=None,cfg=None,inventory=None):
+    state_value = review_state if review_state is not None else os.environ.get('STUDY2_REVIEW_STATE_DIR')
+    if state_value is not None:
+        from .coordinated_update import require_available
+        require_available(state_value)
     # No discovery or fallback to queue_snapshot. Read afresh on each rerun.
-    supplied = os.environ.get(ENVIRONMENT_KEY)
+    supplied = path if path is not None else os.environ.get(ENVIRONMENT_KEY)
     if not supplied:
         raise WorkloadUnavailable('summary_not_supplied')
     try:
@@ -82,17 +86,17 @@ def load_summary(*, release_id, decision_revision, exclusion_revision=None):
     try:
         rows = validate_summary(value, release_id=release_id,
             decision_revision=decision_revision, exclusion_revision=exclusion_revision)
-        rows = _verify_admin_projection(value, rows, release_id, decision_revision)
+        rows = _verify_admin_projection(value, rows, release_id, decision_revision, review_state=review_state,cfg=cfg,inventory=inventory)
     except (RecursionError, KeyError, TypeError, ValueError):
         raise WorkloadUnavailable('summary_invalid') from None
     return value, rows
 
 
-def render_current_review_workload(st, *, release_id, decision_revision, exclusion_revision=None):
+def render_current_review_workload(st, *, release_id, decision_revision, exclusion_revision=None,cfg=None):
     st.subheader('Current review workload')
     try:
         value, rows = load_summary(release_id=release_id,
-            decision_revision=decision_revision, exclusion_revision=exclusion_revision)
+            decision_revision=decision_revision, exclusion_revision=exclusion_revision,cfg=cfg)
     except WorkloadUnavailable:
         st.warning('Current review workload is unavailable. A verified summary matching this release, '
                    'decision revision, exclusion revision and administrative revision is required. Missing or stale counts are not zero.')
@@ -120,24 +124,38 @@ def render_current_review_workload(st, *, release_id, decision_revision, exclusi
                    f"active correction comparisons: {projection['active_correction_comparisons']:,}. "
                    'Unresolvable closure changes work assignment, not missing values, identity or analysis eligibility.')
         st.caption(f"Administrative revision: {block['admin_revision']}")
+        if block.get('carry_forward'):
+            from .administrative_carry_current import HOLD_REASONS
+            st.caption(f"Carried from original closure records: {projection['closed_unresolvable_comparisons']:,} comparisons. "
+                       f"Separate administrative holds: {projection['held_comparisons']:,}, including "
+                       f"{projection['source_only_hold_comparisons']:,} source-only comparisons outside the raw target inventory. "
+                       'Original events are unchanged.')
+            if block['carry_forward']['holds']:
+                st.dataframe([{'Hold':f'Hold {i}','Reason':'; '.join(HOLD_REASONS.get(r,'Source evidence needs review.') for r in row['reasons'])}
+                              for i,row in enumerate(block['carry_forward']['holds'],1)],hide_index=True,width='stretch')
     return True
 
 
-def _verify_admin_projection(value, rows, release_id, decision_revision):
+def _verify_admin_projection(value, rows, release_id, decision_revision, *, review_state=None,cfg=None,inventory=None):
     import sqlite3
     block = value.get('administrative_disposition')
     if block is None:
         return rows
     try:
         from .review_dispositions import administrative_revision, project_closures, DispositionError
-        state = Path(os.environ['STUDY2_REVIEW_STATE_DIR'])
+        state = Path(review_state if review_state is not None else os.environ['STUDY2_REVIEW_STATE_DIR'])
         bindings = block['bindings']
         if bindings['release_id'] != release_id or bindings['decision_revision'] != decision_revision:
             raise WorkloadUnavailable('administrative_state_binding_mismatch')
         work = sqlite3.connect((state / 'review.sqlite').as_uri() + '?mode=ro', uri=True, timeout=5)
         try:
             work.execute('PRAGMA query_only=ON')
-            actual = project_closures(work, bindings, block['case_inventory'])
+            if block.get('carry_forward'):
+                from .administrative_carry_current import validate_workload
+                if not isinstance(cfg,dict) or Path(cfg['state_dir']).resolve()!=state.resolve():
+                    raise WorkloadUnavailable('current_carry_configuration_required')
+                actual=validate_workload(cfg,work,block,inventory=inventory)
+            else:actual = project_closures(work, bindings, block['case_inventory'])
             if (not actual['projection_ready'] or actual != block['projection'] or
                     administrative_revision(work) != block['admin_revision']):
                 raise WorkloadUnavailable('administrative_revision_mismatch')
@@ -146,8 +164,13 @@ def _verify_admin_projection(value, rows, release_id, decision_revision):
         if (actual['raw_correction_comparisons'] != value['native_workload']['field_correction_comparisons'] or
                 actual['active_correction_comparisons'] != value['active_workload']['field_correction_comparisons']):
             raise WorkloadUnavailable('administrative_count_mismatch')
-        if ({k: v for k, v in value['native_workload'].items() if k != 'field_correction_comparisons'} !=
-                {k: v for k, v in value['active_workload'].items() if k != 'field_correction_comparisons'}):
+        ignored={'field_correction_comparisons'}
+        if block.get('carry_forward'):
+            if value['active_workload'].get('administrative_carry_holds')!=actual['held_comparisons']:
+                raise WorkloadUnavailable('administrative_hold_count_mismatch')
+            ignored.add('administrative_carry_holds')
+        if ({k: v for k, v in value['native_workload'].items() if k not in ignored} !=
+                {k: v for k, v in value['active_workload'].items() if k not in ignored}):
             raise WorkloadUnavailable('unrelated_workload_changed')
         return _native_counts(value['active_workload'])
     except WorkloadUnavailable:

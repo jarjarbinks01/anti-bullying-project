@@ -24,8 +24,8 @@ import numpy as np
 from .common import PipelineError, digest, file_hash, load_config, plain, utcnow
 from .dashboard_views import (SAMPLE_NAMES, SOURCE_NAMES, STAGE_PURPOSES,
                               sample_reconciliation, source_wave_counts, stage_overview)
-from .descriptive_spec import DICTIONARY_VERSION, GROUPS, MODES, VERSION, dictionary_rows, variables
-from .descriptives import (cohort, filter_cohort, independent_cohort, paired_changes,
+from .presentation.descriptive_spec import DICTIONARY_VERSION, GROUPS, MODES, VERSION, dictionary_rows, variables
+from .presentation.descriptives import (cohort, filter_cohort, independent_cohort, paired_changes,
                            statistics, wave_counts)
 from .store import connect, current
 from .static_access import ACCESS_FILES, PUBLIC_FILES
@@ -188,7 +188,7 @@ DISPLAY_NOTES = [
 
 
 def _display_note(row):
-    from .descriptive_spec import REPORT_RANGES
+    from .presentation.descriptive_spec import REPORT_RANGES
     key = row['variable_id'].removeprefix('dem_')
     note = row.get('note', '')
     if key in REPORT_RANGES and REPORT_RANGES[key] is not None:
@@ -375,7 +375,7 @@ def overview_changes(selected, reference, role, groups=tuple(GROUPS)):
     retain only exact submission/version members from the formal pair artifact.
     Never join a parent baseline to another adult's follow-up by child ID alone.
     """
-    from .descriptives import group_rows
+    from .presentation.descriptives import group_rows
 
     results = []
     for group in groups:
@@ -418,7 +418,7 @@ def _counts(rows, minimum=0):
 
 def _exploration(rows, role, release_id, paired, minimum):
     from .descriptive_exploration import _validate_pairs, comparison_variables, scale_display
-    from .descriptives import group_rows, values_and_status
+    from .presentation.descriptives import group_rows, values_and_status
     allowed = comparison_variables(rows.attrs['mode'], role, rows) if paired else variables(role)
     hist = []
     for group in GROUPS:
@@ -541,7 +541,7 @@ def build_views(frame, parents, measurements, summary, folder, minimum, progress
                 stats = statistics(selected, role, tuple(GROUPS))
                 changes = (overview_changes(selected, reference, role, tuple(GROUPS))
                            if reference is not None else pair_details(selected, role, tuple(GROUPS)))
-                from .descriptives import group_rows
+                from .presentation.descriptives import group_rows
                 view = dict(mode=mode, role=role, mainstream=mainstream, source=source,
                             grouping_anchor=('wave_response' if mode == 'abcd' else 'wave_student'
                                 if mode == 'ef' else 'independent_parent_T0' if mode.startswith('independent')
@@ -701,6 +701,9 @@ def validate_snapshot(snapshot):
         elif isinstance(value, str) and forbidden.search(value):
             raise PipelineError('靜態快照含有識別碼、個人聯絡或本機路徑。')
     visit(snapshot)
+    if 'controls_status' in snapshot:
+        from .static_controls import validate
+        validate(snapshot['controls_status'],snapshot['release_id'],snapshot.get('release_context'))
     if 'release_context' in snapshot:
         from .static_release_context import validate_release_context
         validate_release_context(snapshot['release_context'], public=True)
@@ -823,8 +826,29 @@ def _lazy_index(html, boot_script):
 
 
 def write_site(snapshot, destination, *, scope_export=None, manual_exclusion=None,
-               verify_inputs=None, input_inventory=None, period_assets=None, semester_assets=None):
+               verify_inputs=None, input_inventory=None, period_assets=None, semester_assets=None, controls_request=None):
+    if controls_request is not None:
+        from .static_controls import capture,revision
+        controls=capture(controls_request,snapshot['release_id'],snapshot.get('release_context'))
+        snapshot={**snapshot,'controls_status':controls}
+        if manual_exclusion is not None:
+            from .presentation.analysis_eligibility import sha
+            manual_exclusion={**manual_exclusion,'off':{**manual_exclusion['off'],
+                'snapshot_revision':sha(plain(pack_snapshot(snapshot)))}}
+            if manual_exclusion.get('on') is not None:
+                manual_exclusion['on']={**manual_exclusion['on'],'snapshot':{
+                    **manual_exclusion['on']['snapshot'],'controls_status':controls}}
+                manual_exclusion['on_revision']=sha(manual_exclusion['on'])
+        previous_verify=verify_inputs
+        def verify_controls():
+            if previous_verify:previous_verify()
+            if capture(controls_request,snapshot['release_id'],snapshot.get('release_context'))!=controls:
+                raise PipelineError('Control source changed during export; previous export retained.')
+        verify_inputs=verify_controls
     from .static_assets import APP_JS, HTML, STYLES
+    if snapshot.get('release_context', {}).get('format') == 'study2_candidate_release_context_v1':
+        from .selected_client_integration import decorate_html
+        HTML = decorate_html(HTML)
     from .static_scope_client import JS_SOURCE as SCOPE_JS
     from .static_quality_ui import JS_SOURCE as QUALITY_JS
     validate_snapshot(snapshot)
@@ -977,10 +1001,20 @@ def _input_inventory(folder, state, release_root):
             'release_location_mapping': _file_pin(state / 'release_locations.json')}
 
 
+from .flag_binding import guarded_consumer
+
+
+@guarded_consumer
 def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None, manual_manifest=None,
-                  release_context=None, default_eligibility='off', project_selected_bd=False):
+                  release_context=None, default_eligibility='off', project_selected_bd=False, controls_request=None):
+    if release_context is not None and release_context.get('format') == 'study2_candidate_release_context_v1':
+        raise PipelineError('Unapplied candidate context requires the separate candidate exporter.')
     if default_eligibility not in {'off', 'on'} or default_eligibility == 'on' and release_context is None:
         raise PipelineError('Default ON requires an explicit validated dashboard release context.')
+    from .flag_binding import resolve_current
+    bound = resolve_current(cfg)
+    if bound is not None and manual_manifest is not None and json.loads(bound.read_bytes()) != manual_manifest:
+        raise PipelineError('Managed exclusion manifest does not match the active ledger')
     state = Path(cfg['state_dir']).resolve()
     raw_destination = Path(destination).absolute()
     if raw_destination.is_symlink():
@@ -1051,7 +1085,7 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
         run = None
         if release_context is not None:
             from .static_release_context import validate_release_context
-            from .runner import program_hash
+            from .controls_capture import code_revision as program_hash
             validate_release_context(release_context)
             run = db.execute('SELECT run_id, fingerprint FROM runs WHERE run_id=?', (release['run_id'],)).fetchone()
             if run is None:
@@ -1061,6 +1095,8 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             pins['export_program_hash'] = dict(sha256=program_hash())
         initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest', 'supplied_release_context', 'analytical_run', 'export_program_hash', 'bd_projection_checksums'}}
         def verify():
+            if bound is not None and manual_manifest is not None and resolve_current(cfg) != bound:
+                raise PipelineError('Managed exclusion binding changed during export; previous export retained.')
             now = current(db)
             counts_now = sorted(imported_source_counts(db, release['run_id']), key=lambda row: json.dumps(row, sort_keys=True))
             if (now != release or _input_inventory(folder, state, release_root) != initial_files or
@@ -1124,7 +1160,7 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
         if manual_export is not None:
             # Add the same validated lazy index to both immutable snapshots.
             # Only an already valid ON bundle can authorize an ON period cube.
-            from .analysis_eligibility import sha
+            from .presentation.analysis_eligibility import sha
             from .manual_exclusion_export import validate_manual_export
             manual_export['off']['snapshot_revision'] = sha(plain(pack_snapshot(snapshot)))
             if accepted_on:
@@ -1135,22 +1171,23 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
         verify()
         return write_site(snapshot, destination, scope_export=scope,
                           manual_exclusion=manual_export, verify_inputs=verify, input_inventory=pins,
-                          period_assets=period_assets, semester_assets=semester_assets)
+                          period_assets=period_assets, semester_assets=semester_assets, controls_request=controls_request)
     finally:
         db.close()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description='Study 2 aggregate-only static export')
     parser.add_argument('--config', type=Path, default=Path('config.local.json'))
     parser.add_argument('--output', type=Path, default=Path('static_dashboard'))
     parser.add_argument('--manual-manifest', type=Path, help='Exact accepted private composed exclusion manifest')
     parser.add_argument('--release-context', type=Path, help='Strict current-run aggregate control provenance')
-    parser.add_argument('--default-eligibility', choices=('off', 'on'), default='off',
+    parser.add_argument('--controls-request', type=Path, help='Pin wrapper for the read-only local controls source request')
+    parser.add_argument('--default-eligibility', choices=('off', 'on'), default='on',
                         help='Explicit initial analytical mask; ON requires a validated release context')
-    parser.add_argument('--project-selected-bd', action='store_true',
-                        help='Derive a reviewable same-child BD view from the pinned legacy selected waves')
-    args = parser.parse_args()
+    parser.add_argument('--project-selected-bd', action=argparse.BooleanOptionalAction, default=True,
+                        help='Project fixed selected B/D slots under the same-child policy')
+    args = parser.parse_args(argv)
     def supplied(path):
         if path is None:
             return None
@@ -1159,7 +1196,7 @@ def main():
         return json.loads(path.read_bytes())
     print(json.dumps(export_static(load_config(args.config), args.output,
         manual_manifest=supplied(args.manual_manifest), release_context=supplied(args.release_context),
-        default_eligibility=args.default_eligibility, project_selected_bd=args.project_selected_bd), ensure_ascii=False))
+        default_eligibility=args.default_eligibility,controls_request=supplied(args.controls_request), project_selected_bd=args.project_selected_bd), ensure_ascii=False))
 
 
 if __name__ == '__main__':

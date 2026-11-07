@@ -13,6 +13,8 @@ def resolve_paper_rows(db, source, rows):
     if db is None:
         return {position: f"{source.get('sheet', 0)}:registered_row:{position}" for position, _ in hashes}
     known = list(db.execute("SELECT * FROM paper_registry WHERE source_id=? ORDER BY slot", (source["source_id"],)))
+    from .source_time_transitions import effective_registry
+    known = effective_registry(db, source["source_id"], known)
     count = Counter(h for _, h in hashes)
     old_count = Counter(r["raw_hash"] for r in known)
     if any(count[h] < n for h, n in old_count.items()):

@@ -57,10 +57,10 @@ def recover_activation(state):
     if not path.exists():return
     journal=json.loads(path.read_text())
     if journal.get('status')!='applying':return
-    import fcntl
-    with (state/'writer.lock').open('a') as lock:
-        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise PipelineError('Storage activation is in progress; retry when it completes') from None
+    from .owned_locks import exclusive
+    with exclusive(state/'writer.lock'):
+        from .coordinated_update import require_available
+        require_available(state)
         journal=json.loads(path.read_text())
         if journal.get('status')!='applying':return
         previous=Path(journal['previous'])

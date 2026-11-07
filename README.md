@@ -8,13 +8,14 @@ The [descriptive analysis guide](docs/DESCRIPTIVE_ANALYSIS.md) explains the four
 
 ## Static dashboard for Vercel
 
-After publishing a validated research release, run:
+After publishing a validated research release, use the current accepted manifest, release context and controls-request pins:
 
 ```sh
-./.venv/bin/python -m study2 static-export
+./.venv/bin/python -m study2 static-export --manual-manifest /path/to/private/composed.json \
+  --release-context /path/to/private/context.json --controls-request /path/to/private/request-pin.json
 ```
 
-Alternatively, open `Export Static Dashboard.command`. The exporter reads the
+`Export Static Dashboard.command` accepts the same arguments; opening it without arguments shows help. The exporter reads the
 current published release without writing the research databases. It creates
 `static_dashboard/`, which is ignored by Git. Open its `index.html` to preview
 locally. HTML, CSS, JavaScript and the aggregate snapshot are self-contained;
@@ -103,6 +104,21 @@ personal extremes and free-text missing-reason detail are excluded. Everything i
 snapshot is downloadable by authenticated researchers. The server gate controls
 new web requests; noindex and browser security headers alone are not authentication.
 
+## Maintained source and publication workflow
+
+Start with [project state](docs/PROJECT_STATE.md), [design decisions](docs/DECISIONS.md),
+and the [portable workflow](docs/PORTABLE_WORKFLOW.md). Both public CLI forms use
+one entrypoint. Native science and the selected-child presentation share the
+maintained checkout; private paths and historical trust bindings stay in local
+configuration. The current local installation is not changed by a Git commit.
+
+The pipeline repository is public and contains code/general rules, synthetic
+tests and non-sensitive documentation. Reviewed generated dashboard files belong
+in the separate private deployment repository, followed by an explicit Vercel
+deployment. Participant decisions, evidence, databases and secrets are never
+part of the public source commit. See the workflow guide before activating a
+new source checkout or exporting a new dashboard.
+
 ## Install
 
 Requires Python 3.12 or later. Run inside this repository:
@@ -138,7 +154,7 @@ For a new research computer, obtain the private source workbooks, existing upstr
 .venv/bin/python -m study2 dashboard
 ```
 
-The dashboard opens at `http://127.0.0.1:8501` and reads only the published release. The CLI also supports validation, unpublished trial runs, controlled corrections, review-card export / receipt / approval, publication, rollback and backup restoration. Run `.venv/bin/python -m study2 --help` for the commands.
+The public `dashboard` command opens the configured protected formal HTML/JavaScript preview after checking it against current published controls. Its local address comes from private preview configuration; see [presentation setup](docs/presentation-boundary.md). The CLI also supports validation, unpublished trial runs, controlled corrections, review-card export / receipt / approval, publication, rollback and backup restoration. Run `.venv/bin/python -m study2 --help` for the commands.
 
 ## Research rules and review
 
@@ -183,15 +199,41 @@ An operation can commit successfully while checkpoint creation fails, for exampl
 
 `storage-gc` is a dry run. Add `--apply` to remove only objects outside all retained run, source-version, package, task and checkpoint references. Neither mode deletes research records. Keep active databases and temporary recovery files outside synchronized folders. Storage reports identify cloud placeholders through metadata without downloading them.
 
-## Develop and push safely
+## Develop and prepare a pull request
+
+Work on a feature branch. Run focused checks for the changed boundary while editing,
+and the broader synthetic suite against a stable tree before a pull request.
+Tests that pin source bytes must not run while those files are changing.
 
 ```sh
+git switch -c feature/describe-the-change
 .venv/bin/python -m pytest tests
 git add dashboard.py study2 tests
 python3 tools/repository_guard.py --staged
 git commit -m 'Describe the code change'
-git push origin main
 ```
+
+After reviewing the code-only commit, publish the feature branch and open a PR
+against `main` when authorized. Do not push directly to `main` as part of a local
+commit. Source publication does not activate research state or deploy a dashboard.
+
+Browser integration checks need Node and Playwright with Chromium. Set
+`SOURCE_UI_NODE_MODULES` to the `node_modules` directory of your test dependency
+installation; do not rely on a particular computer's cached packages. The
+consolidation was checked with Node 25 and Playwright 1.62.1. For example:
+
+```sh
+npm install --prefix "$HOME/.local/share/study2-test-browser" playwright@1.62.1
+"$HOME/.local/share/study2-test-browser/node_modules/.bin/playwright" install chromium
+export SOURCE_UI_NODE_MODULES="$HOME/.local/share/study2-test-browser/node_modules"
+export NODE_PATH="$SOURCE_UI_NODE_MODULES"
+```
+
+Run browser checks in an environment permitted to launch Chromium and temporary
+loopback test servers. A sandbox startup denial is not an application test result.
+The [portable workflow](docs/PORTABLE_WORKFLOW.md#focused-verification) lists the
+optional frozen-synthetic-fixture tests and their explicit setup. Missing optional
+fixtures produce skips, not passing coverage.
 
 The ignore file uses an allowlist. The local hooks check the entire staged tree and the history being pushed. The guard rejects unapproved paths, data formats, real-record identifiers, user-specific paths and common credential patterns. The one workbook exception is a hash-pinned blank style template needed for review-card export.
 

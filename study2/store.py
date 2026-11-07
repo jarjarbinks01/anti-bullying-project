@@ -92,18 +92,13 @@ def connect(state: Path, readonly: bool = False) -> sqlite3.Connection:
 @contextmanager
 def writer_lock(state: Path):
     from .maintenance import recover_activation
-    recover_activation(state)
-    import fcntl
     secure_directory(state)
-    with (state / "writer.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise PipelineError("Another pipeline/review operation is running") from None
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    from .owned_locks import exclusive
+    with exclusive(state / 'writer.lock'):
+        from .coordinated_update import require_available
+        require_available(state)
+        recover_activation(state)
+        yield
 
 
 def current(db: sqlite3.Connection) -> dict | None:

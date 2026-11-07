@@ -2,17 +2,29 @@
 # Only reviewed code, generic documentation and one blank layout are allowed.
 /*
 !/.gitignore
+!/AGENTS.md
 !/.gitattributes
 !/README.md
 !/pyproject.toml
 !/requirements.lock.txt
 !/dashboard.py
+!/local_update_entry.py
 !/config.example.json
 !/*.command
 
 !/study2/
 /study2/*
 !/study2/*.py
+!/study2/presentation/
+/study2/presentation/*
+!/study2/presentation/*.py
+!/study2/presentation/assets/
+/study2/presentation/assets/*
+!/study2/presentation/assets/app.js
+!/study2/presentation/assets/app.css
+!/study2/presentation/assets/quality.js
+!/study2/presentation/assets/scope.js
+!/study2/presentation/assets/local-preview.mjs
 !/study2/assets/
 /study2/assets/*
 !/study2/assets/review_template.xlsx
@@ -45,6 +57,11 @@
 !/docs/MATCHING_RULES.md
 !/docs/CODE_READING_GUIDE.md
 !/docs/REPOSITORY.md
+!/docs/PORTABLE_WORKFLOW.md
+!/docs/PROJECT_STATE.md
+!/docs/DECISIONS.md
+!/docs/portable-update-helpers.md
+!/docs/presentation-boundary.md
 !/docs/DYAD_TRACKING_OPERATIONS.md
 !/docs/INDEPENDENT_PARENT_ANALYSIS.md
 !/docs/DESCRIPTIVE_ANALYSIS.md

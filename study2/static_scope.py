@@ -522,7 +522,7 @@ def validate_index(index):
             singles[r["profiles"][0]] += r["count"]
         _need(r["count"] <= raw_total, "sample_exceeds_raw")
     if 'eligibility' in index:
-        from .analysis_eligibility import validate_scope_eligibility
+        from .presentation.analysis_eligibility import validate_scope_eligibility
         excluded = validate_scope_eligibility(index)
         selected.subtract(excluded)
         selected = +selected
@@ -671,7 +671,7 @@ def _assemble(index, scope, mask):
                school=school, reconciliation=deepcopy(index["meta"]["reconciliation"]),
                scope_notice="First-tab scope only; published matching and other tabs are unchanged.")
     if 'eligibility' in index:
-        from .analysis_eligibility import query_scope_eligibility
+        from .presentation.analysis_eligibility import query_scope_eligibility
         out['eligibility'] = query_scope_eligibility(index, mask)
         out['scope_notice'] = 'Fixed published members after manual analytical exclusions; raw and stages remain historical.'
     canonical_json(out)

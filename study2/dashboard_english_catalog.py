@@ -1302,6 +1302,7 @@ TEXT = {'同校、聯絡及孩子身份一致': 'Same school, contact and child 
  '各輪全部樣本（A／B／C／D）': 'All responses by wave (A/B/C/D)',
  '各輪親子樣本（E／F）': 'Parent–child samples by wave (E/F)',
  '同一人跨期樣本（AC／BD）': 'Same-person longitudinal sample (AC/BD)',
+ '學生／家長跨期樣本（AC／BD）': 'Student/parent longitudinal sample (AC/BD)',
  '跨期親子樣本（EF）': 'Longitudinal parent–child sample (EF)',
  '男小學': 'Male, primary',
  '女小學': 'Female, primary',

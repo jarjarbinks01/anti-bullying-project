@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS followups(case_id TEXT PRIMARY KEY, task_id TEXT, sta
 
 def workspace(cfg):
     state = Path(cfg["state_dir"])
+    from .coordinated_update import require_available
+    require_available(state)
+    from .coordinated_update import review_reader
+    reader = review_reader(cfg)
+    if reader is not None:
+        return reader
     from .maintenance import recover_activation
     recover_activation(state)
     secure_directory(state)
@@ -961,7 +967,7 @@ def apply_batch(cfg, batch_id):
                     main.close()
         except PipelineError as error:
             work.rollback()
-            if "Another pipeline" in str(error):
+            if str(error) == "exclusive_writer_busy" or "Another pipeline" in str(error):
                 return {"batch_id": batch_id, "state": "approved", "message": "Pipeline 正在執行；結果已批准、待套用，請稍後重試"}
             raise
     finally:

@@ -23,6 +23,10 @@ from test_static_source_ui import PLAYWRIGHT_ROOT
 
 @pytest.fixture(scope='module')
 def paired_table_evidence(tmp_path_factory):
+    missing = [key for key in ('PAIRED_TABLE_BASELINE_ASSET', 'PAIRED_TABLE_EVIDENCE_DIR')
+               if not os.environ.get(key)]
+    if missing:
+        pytest.skip('Optional synthetic paired-table UI fixtures require: ' + ', '.join(missing))
     folder=tmp_path_factory.mktemp('paired-table-ui')
     variants,cases=snapshot_bundle()
     site=folder/'site';write_site(variants['normal'],site)

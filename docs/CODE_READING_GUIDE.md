@@ -2,7 +2,11 @@
 
 本指南供接手維護的同事閱讀程式。研究規則的完整定義見 [MATCHING_RULES.md](MATCHING_RULES.md)；日常派工及批准流程見 [REVIEW_CARDS_OPERATIONS.md](REVIEW_CARDS_OPERATIONS.md)。
 
+開始新工作時，先看 [PROJECT_STATE.md](PROJECT_STATE.md) 的目前里程碑及 [DECISIONS.md](DECISIONS.md) 的相關選擇，再核對實際分支與工作區。這些文件不代替私有發布紀錄，也不表示新程式已啟用或部署。
+
 ## 第一次閱讀的順序
+
+先從 `study2/entrypoint.py::main` 看公開命令入口；`python -m study2` 與已安裝的 `study2` 命令共用此處。套件內的原生 CLI 不是另一條可繞過協調流程的操作路線。安裝與私有設定見 [PORTABLE_WORKFLOW.md](PORTABLE_WORKFLOW.md)。
 
 1. 先看 `study2/runner.py::run`，了解匯入、身份、輪次、輸出及發布的先後次序。
 2. 看 `study2/matching.py::automatic_rule` 及 `link_records`，了解孩子身份證據如何變成已確認群組。
@@ -10,11 +14,13 @@
 4. 看 `respondents.py::adult_match`、`classify_adult` 及 `adult_followups`，了解同一成人 BD 如何另行確認。
 5. 看 `review_groups.py::build_groups` 及 `review_dispatch.py::Router`，分清候選範圍和真正可交助手處理的問題。
 6. 看 `review_core.py` 的五個工作流程接口，最後才看 Excel adapter 和 dashboard。
+7. 看 `bd_pairing.py`、`static_export.py` 與 `presentation/`，分清原生同成人 BD、已選同孩子 B/D 投影及最終瀏覽器資產。群組決定的跨版承接另看 `group_decision_intents.py`，不是按新群組 ID 直接複製舊答案。
 
 ## 模組各自負責甚麼
 
 | 模組 | 責任 | 閱讀入口 |
 |---|---|---|
+| `entrypoint.py` | 公開命令路由、私有設定及既有協調流程的入口 | `main` |
 | `runner.py` | 串起 pipeline，驗證及發布版本 | `run`、`publish_release` |
 | `merged.py`、`adapters.py` | 來源登記、標準化及匯入 | 由 `runner.run` 的呼叫追入 |
 | `matching.py` | 孩子身份、人工限制、學生輪次及重填 | `link_records`、`select_waves` |
@@ -28,7 +34,11 @@
 | `review_excel.py` | 將審核任務寫成卡片及讀取答案 | 由 Review Centre 的操作追入 |
 | `outputs.py` | 共用計分、分析輸出及摘要 | `write_outputs` |
 | `dyads.py`、`dyad_operator.py` | 永久親子追蹤登記及邀請狀態 | 由 `runner.run` 和 Dyad Centre 追入 |
-| `dashboard_views.py`、`dashboard.py` | 發布資料的統計口徑及顯示 | 對照 dashboard 分頁閱讀 |
+| `dashboard_views.py`、`dashboard.py` | 保留的原生／Streamlit 統計顯示 | 不代表正式 HTML Dashboard 的入口 |
+| `bd_pairing.py` | 已選家長輪次的同孩子投影及確切成人連續性證據 | `selected_parent_pairs`、`project_published_selection` |
+| `group_decision_intents.py` | 保存裁定意圖並按當前證據及原有範圍編譯承接結果 | `compile_application` |
+| `static_export.py`、`presentation/` | HTML Dashboard 匯出、呈現邊界及可維護的最終 JS/CSS | [呈現邊界](presentation-boundary.md) |
+| `controls_capture.py`、`formal_dashboard.py` | 只讀控制擷取及受保護的正式預覽入口 | [呈現及預覽設定](presentation-boundary.md) |
 
 ## 孩子身份的閱讀重點
 
@@ -54,6 +64,8 @@
 - `_select_phase_response`：在同一輪次內檢查同一成人後處理短期重填，保護已選的家長基線。
 
 `adult_followups` 另行檢查 BD。有效人工決定優先，自動證據須符合成人年份及聯絡規則。`_consistent_adult_matches` 檢查所有競爭成人資料，防止某宗人工錯字例外經由第三份問卷傳遞。
+
+這裏的 BD 是原生／歷史同成人分析。Dashboard 的同孩子 B/D 視圖由 `bd_pairing` 對已選輪次另行投影，不能把兩者的分母或數量混用；配對家長 PHQ 仍須確認同一成人。詳見 [MATCHING_RULES.md](MATCHING_RULES.md)。
 
 這些函數會直接更新傳入的 record 字典。改動時必須保留處理順序，不能在身份未定前先把回應去重。
 

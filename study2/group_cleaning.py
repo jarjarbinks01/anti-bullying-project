@@ -24,7 +24,8 @@ PHONE_FIELDS = ('contact_01','contact_02','contact_03.1','contact_03.2','contact
 
 def implementation_revision():
     return sha({n:file_hash(Path(__file__).parent/n) for n in
-        ('group_cleaning.py','group_cleaning_operator.py','review_dispatch.py','common.py','manual_flags.py','analysis_eligibility.py')})
+        ('group_cleaning.py','group_cleaning_operator.py','review_dispatch.py','common.py','manual_flags.py','analysis_eligibility.py',
+         'compatibility_profiles.py','pair_continuity.py','continuity_integration.py','flag_binding.py','group_decision_intents.py')})
 
 
 class PolicyError(PipelineError):
@@ -238,7 +239,7 @@ def burst_candidate(records, member_ids, source_evidence):
                 source_proofs=evidence,earliest=min(times).isoformat(),latest=max(times).isoformat())
 
 
-def project_workload(records, cases, groups, decisions=(), *, excluded=(), partitions=None):
+def project_workload(records, cases, groups, decisions=(), *, excluded=(), partitions=None, intent_application=None):
     """Read-only projection. Correction cases are never policy-closed."""
     from .review_dispatch import Router
     excluded=set(excluded);partitions=partitions or {}
@@ -261,6 +262,9 @@ def project_workload(records, cases, groups, decisions=(), *, excluded=(), parti
         partition=[[s for s in block if s not in excluded] for block in partition] if partition is not None else None
         partition=[b for b in partition if b] if partition is not None else None
         results[gid]=classify_scope(records,cut,cases,partition=partition)
+    if intent_application is not None:
+        from .group_decision_intents import apply_to_scopes
+        results=apply_to_scopes(results,intent_application)
     router=Router(records,decisions)
     corrections=[cid for cid,c in cases.items() if not c.get('group_review') and c.get('status')=='pending'
         and router.classify(c)['route']=='correction' and not excluded.intersection({c['record_a'],c.get('record_b')})]
@@ -273,15 +277,26 @@ def project_workload(records, cases, groups, decisions=(), *, excluded=(), parti
              and c.get('kind') in {'identity','family','respondent'} and c.get('record_b')
              and cid not in closed_ids and not excluded.intersection({c['record_a'],c['record_b']})]
     adults=[cid for cid in pending if cases[cid]['kind']=='respondent']
-    return dict(policy=POLICY,scopes=results,questions=questions,holds=holds,closures=closures,
+    intent_holds=([deepcopy(e) for e in intent_application['entries']
+                   if e['status'] in {'held','requires_existing_continuity_proof'}]
+                  if intent_application is not None else [])
+    intent_groups={e['group_id'] for e in intent_holds if e['group_id'] is not None}
+    result=dict(policy=POLICY,scopes=results,questions=questions,holds=holds,closures=closures,
                 correction_comparison_ids=sorted(corrections),excluded_ids=sorted(excluded),
                 pending_comparison_ids=sorted(pending),adult_comparison_ids=sorted(adults),
                 counts=dict(similarity_questions=len(questions),similarity_scopes=len({q['group_id'] for q in questions}),
                     edge_holds=len(holds),held_scopes=len({q['group_id'] for q in holds}),
                     policy_closed_links=len(closures),policy_closed_scopes=len({q['group_id'] for q in closures}),
                     field_correction_comparisons=len(corrections),remaining_pending_comparisons=len(pending),
-                    remaining_open_group_scopes=len({q['group_id'] for q in questions+holds}),
+                    remaining_open_group_scopes=len({q['group_id'] for q in questions+holds}|intent_groups),
                     separate_adult_comparisons=len(adults)),science_changed=False)
+    if intent_application is not None:
+        # A merged identity can leave no native cross-atom row. Its historical
+        # administrative decision still needs review; do not invent a new edge.
+        result['intent_holds']=intent_holds
+        result['counts']['pending_decision_intents']=len({e['decision_id'] for e in intent_holds})
+        result['counts']['decision_intent_hold_scopes']=len(intent_groups)
+    return result
 
 
 def exclusion_manifest(records, release_id, ids, *, operator, at):
@@ -303,7 +318,7 @@ def combined_manifest(records, release_id, eric_manifest, policy_manifest, *, op
 def make_proposal(records, cases, groups, decisions, *, release_id, main_revision,
                   rules_hash, eric_manifest, source_evidence, partitions=None,
                   user_exclusions=None, authorization=None, prior_policy_manifest=None,
-                  prior_policy_origin_revision=None, prior_policy_head=None):
+                  prior_policy_origin_revision=None, prior_policy_head=None, decision_intents=None):
     """Deterministic dry-run used again at apply; no approval or persistence."""
     rows=list(records.values());partitions=partitions or {};user_exclusions=user_exclusions or {}
     eric=validate_manifest(eric_manifest,rows,release_id)
@@ -336,11 +351,21 @@ def make_proposal(records, cases, groups, decisions, *, release_id, main_revisio
     # Existing copy/version policy is reused, not circumvented by a new lane.
     exclusion_manifest(rows,release_id,active_ids,operator='dry_run_only',at=eric_manifest['approved_at'])
     before=project_workload(records,cases,groups,decisions,excluded=eric,partitions={})
-    after=project_workload(records,cases,groups,decisions,excluded=eric|active_ids,partitions=partitions)
+    application=None
+    if decision_intents is not None:
+        from .group_decision_intents import compile_application
+        from .continuity_integration import PROFILES
+        application=compile_application(decision_intents,records,cases,groups,release_id=release_id,
+                                        continuity_profile=PROFILES.get(release_id))
+    after=project_workload(records,cases,groups,decisions,excluded=eric|active_ids,partitions=partitions,
+                           intent_application=application)
     dispositions=Counter()
+    intent_hold_groups={e['group_id'] for e in (application or {}).get('entries',[])
+                        if e['status'] in {'held','requires_existing_continuity_proof'}}
     for gid,g in groups.items():
         active=after['scopes'].get(gid)
         if set(g['group_review']['members'])<=(eric|active_ids):dispositions['fully_flag_excluded']+=1
+        elif gid in intent_hold_groups:dispositions['intent_review_required']+=1
         elif active and active['questions']:dispositions['retains_phone_question']+=1
         elif active and active['holds']:dispositions['edge_hold_only']+=1
         else:dispositions['policy_closed']+=1
@@ -368,6 +393,9 @@ def make_proposal(records, cases, groups, decisions, *, release_id, main_revisio
             union_policy_records=len(active_ids),eric_overlap=len(active_ids&eric),
             preserved_prior_policy_records=len(prior_ids),newly_excluded=len(active_ids-eric-prior_ids)),
         science_changed=False,permanent_nonmatch=False)
+    if decision_intents is not None:
+        result['decision_intents']=deepcopy(decision_intents)
+        result['decision_application']=application
     result['revision']=sha(result)
     return result
 

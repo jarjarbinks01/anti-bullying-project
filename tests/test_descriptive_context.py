@@ -192,7 +192,7 @@ def test_case_f_paired_reading_shows_the_paired_reminder(inputs, tmp_path):
     captions = captions_of(app)
     assert english(PAIRED_REMINDER) in captions
     assert english(OVERVIEW_REMINDER) not in captions
-    assert english('分析樣本：同一人跨期樣本（AC／BD）') in captions
+    assert english('分析樣本：學生／家長跨期樣本（AC／BD）') in captions
 
 
 def test_case_f_group_filter_is_reflected_in_the_card_without_changing_n(inputs, tmp_path):

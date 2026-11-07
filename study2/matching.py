@@ -35,6 +35,12 @@ def identity_evidence_versions(r: dict) -> list[dict]:
         new = parse_grade(r['grade_raw']).number
         if old is None and new is not None and current['grade'] in (old, new):
             versions.append({**current, 'grade': new if current['grade'] is None else old})
+    # Explicit approved raw-version transitions preserve permanent identity
+    # evidence only. Wave/date selection still uses the current observed_at.
+    base_versions = list(versions)
+    for observed in r.get('approved_creation_time_history', []):
+        versions.extend({**e, 'observed_at': observed} for e in base_versions
+                        if e.get('observed_at') != observed)
     return versions
 
 

@@ -126,7 +126,9 @@ def schedule(config_path: Path, install: bool):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Study 2 auditable local prototype")
+    parser = argparse.ArgumentParser(description="Study 2 auditable local prototype",
+        epilog="Public entry also provides review-prepare, reviewed-publish, reviewed-session, "
+               "reviewed-recover, controls-capture and --runtime-info. Use study2 COMMAND --help or docs/PORTABLE_WORKFLOW.md.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init")
@@ -238,6 +240,12 @@ def main():
             state = Path(cfg["state_dir"])
             if args.command == 'student-ac-export':
                 from .ac_export import export_student_ac
+                from .flag_binding import resolve_current
+                bound = resolve_current(cfg)
+                if bound is not None and args.manual_exclusions == 'on':
+                    if args.exclusion_manifest is not None and args.exclusion_manifest.resolve() != bound.resolve():
+                        raise PipelineError('Managed exclusion manifest does not match the active ledger')
+                    args.exclusion_manifest = bound
                 if args.manual_exclusions == 'on' and args.exclusion_manifest is None:
                     raise PipelineError('ON export requires an explicit accepted exclusion manifest')
                 result = export_student_ac(cfg, args.output, manifest_path=args.exclusion_manifest,

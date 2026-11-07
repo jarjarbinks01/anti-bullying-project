@@ -428,8 +428,8 @@ def legacy_summary_snapshot(role='student', mode='acbd', explicit_missing=False)
 
 def render_legacy_summary(view, snap, request):
     """Execute the unchanged r2 renderer and CSV writer without a web server."""
-    from pathlib import Path
-    assets = (Path(__file__).resolve().parents[1]/'study2/static_assets.py').read_text()
+    from study2.static_assets import APP_JS
+    assets = APP_JS
     def function(name, end):
         return assets[assets.index('function '+name):assets.index('\nfunction '+end, assets.index('function '+name))]
     code = r'''
@@ -444,6 +444,7 @@ const download=(text,name)=>downloads.push({text,name});
 const num=v=>v===null||v===undefined?'—':Number(v).toFixed(2),n=v=>String(v);
 const families={all:'All',PHQ:'PHQ',FQOL:'FQOL',SEC:'SEC',bullying:'Bullying'};
 '''
+    code += '\nconst eligibility=null;\n' + function('releaseMetadata(', 'reviewWorkload(')
     code += '\n'.join([function('statValue(', 'scoreMeaning('),
         function('scoreMeaning(', 'pValue('), function('pValue(', 'inferenceNote('),
         function('comparisonRows(', 'periodComparison('), function('csv(', 'table('),

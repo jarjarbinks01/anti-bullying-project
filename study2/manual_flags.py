@@ -615,12 +615,12 @@ def status(registry_path, *, include_history=False):
         return result
 
 
-def compile_snapshot(registry_path, inventory, *, operator):
-    """Persist accepted or blocked exact-release compilation; never a partial manifest."""
+def compile_snapshot(registry_path, inventory, *, operator, persist=True):
+    """Compile exact-release flags; persist=False performs no registry writes."""
     _actor(operator)
     inventory = inventory.checked()
     current = {r['submission_id']: _pin(r) for r in inventory.records}
-    with _registry(registry_path, write=True) as (connection, metadata, state):
+    with _registry(registry_path, write=persist) as (connection, metadata, state):
         state_revision = sha(state)
         snapshot_id = sha([metadata['registry_id'], inventory.release_id, inventory.revision,
                            state_revision, RULE, COPY_POLICY])
@@ -668,7 +668,8 @@ def compile_snapshot(registry_path, inventory, *, operator):
             except (ValueError, TypeError, KeyError, EligibilityError):
                 raise FlagError('invalid_cached_snapshot') from None
             return cached
-        connection.execute('INSERT INTO snapshots VALUES (?,?)', (snapshot_id, _json(report)))
+        if persist:
+            connection.execute('INSERT INTO snapshots VALUES (?,?)', (snapshot_id, _json(report)))
         return report
 
 

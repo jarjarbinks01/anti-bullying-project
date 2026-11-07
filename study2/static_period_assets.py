@@ -68,10 +68,10 @@ def prepare_assets(frame, parents, measurements, summary, *, records=None, manif
     from .static_period import FORMAT, build_cube, validate_cube
     from .static_grade import attach_grade
     from .static_sources import source_code
-    from .descriptives import cohort, independent_cohort
-    from .descriptive_spec import MODES as FORMAL_MODES
+    from .presentation.descriptives import cohort, independent_cohort
+    from .presentation.descriptive_spec import MODES as FORMAL_MODES
     from .descriptive_trends import dated_rows, date_mask
-    from .analysis_eligibility import project_eligibility, projected_cohorts, EligibilityError
+    from .presentation.analysis_eligibility import project_eligibility, projected_cohorts, EligibilityError
     release = summary['release_id']
     assets = empty_assets(release)
     references = {}
@@ -205,10 +205,10 @@ def prepare_semester_assets(frame, parents, measurements, summary, *, records=No
     from .static_semester import FORMAT, build_cube
     from .static_grade import attach_grade
     from .static_sources import source_code
-    from .descriptives import cohort, independent_cohort
-    from .descriptive_spec import MODES as FORMAL_MODES
+    from .presentation.descriptives import cohort, independent_cohort
+    from .presentation.descriptive_spec import MODES as FORMAL_MODES
     from .descriptive_trends import dated_rows, date_mask
-    from .analysis_eligibility import project_eligibility, projected_cohorts, EligibilityError
+    from .presentation.analysis_eligibility import project_eligibility, projected_cohorts, EligibilityError
 
     release = summary['release_id']
     active = manifest.get('revision') if isinstance(manifest, dict) else None
