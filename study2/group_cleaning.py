@@ -239,7 +239,7 @@ def burst_candidate(records, member_ids, source_evidence):
                 source_proofs=evidence,earliest=min(times).isoformat(),latest=max(times).isoformat())
 
 
-def project_workload(records, cases, groups, decisions=(), *, excluded=(), partitions=None, intent_application=None):
+def project_workload(records, cases, groups, decisions=(), *, excluded=(), partitions=None, intent_application=None, decision_intents=None):
     """Read-only projection. Correction cases are never policy-closed."""
     from .review_dispatch import Router
     excluded=set(excluded);partitions=partitions or {}
@@ -277,8 +277,14 @@ def project_workload(records, cases, groups, decisions=(), *, excluded=(), parti
              and c.get('kind') in {'identity','family','respondent'} and c.get('record_b')
              and cid not in closed_ids and not excluded.intersection({c['record_a'],c['record_b']})]
     adults=[cid for cid in pending if cases[cid]['kind']=='respondent']
+    # Application subjects describe an edge, but its hold can concern any
+    # original subject (including one now missing or outside this group).
+    intent_subjects={item['decision_id']:{p['submission_id'] for p in item['subjects']}
+                     for item in (decision_intents or {}).get('intents',[])}
     intent_holds=([deepcopy(e) for e in intent_application['entries']
-                   if e['status'] in {'held','requires_existing_continuity_proof'}]
+                   if e['status'] in {'held','requires_existing_continuity_proof'}
+                   and not (intent_subjects.get(e['decision_id']) and
+                            intent_subjects[e['decision_id']] <= excluded)]
                   if intent_application is not None else [])
     intent_groups={e['group_id'] for e in intent_holds if e['group_id'] is not None}
     result=dict(policy=POLICY,scopes=results,questions=questions,holds=holds,closures=closures,
@@ -358,10 +364,9 @@ def make_proposal(records, cases, groups, decisions, *, release_id, main_revisio
         application=compile_application(decision_intents,records,cases,groups,release_id=release_id,
                                         continuity_profile=PROFILES.get(release_id))
     after=project_workload(records,cases,groups,decisions,excluded=eric|active_ids,partitions=partitions,
-                           intent_application=application)
+                           intent_application=application,decision_intents=decision_intents)
     dispositions=Counter()
-    intent_hold_groups={e['group_id'] for e in (application or {}).get('entries',[])
-                        if e['status'] in {'held','requires_existing_continuity_proof'}}
+    intent_hold_groups={e['group_id'] for e in after.get('intent_holds',[])}
     for gid,g in groups.items():
         active=after['scopes'].get(gid)
         if set(g['group_review']['members'])<=(eric|active_ids):dispositions['fully_flag_excluded']+=1

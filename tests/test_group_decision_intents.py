@@ -155,3 +155,90 @@ def test_no_transitive_closure_for_a_new_ac_comparison():
     assert {c for row in p['projection']['closures'] for c in row['comparison_ids']}=={'AB','BC'}
     assert p['projection']['pending_comparison_ids']==['AC']
     assert p['decision_application']['permanent_nonmatch'] is False
+
+
+@pytest.mark.parametrize('status',['held','requires_existing_continuity_proof'])
+@pytest.mark.parametrize('excluded,expected',[(set(),1),({'SYN_A'},1),({'SYN_A','SYN_B'},0)])
+def test_exclusions_remove_only_fully_excluded_active_intent_work(original,status,excluded,expected):
+    records,cases,groups,_,_,collection=deepcopy(original)
+    records['SYN_A']['version_id']='changed'
+    application=intents.compile_application(collection,records,cases,groups,release_id='RUN_SYN_NEW')
+    application['entries'][0]['status']=status
+    before=deepcopy((application,collection))
+    result=policy.project_workload(records,cases,groups,[],excluded=excluded,intent_application=application,decision_intents=collection)
+    assert result['counts']['pending_decision_intents']==expected
+    assert result['counts']['decision_intent_hold_scopes']==expected
+    assert len(result['intent_holds'])==expected
+    if not expected:assert result['counts']['remaining_open_group_scopes']==0
+    assert (application,collection)==before
+
+
+def test_missing_subject_review_survives_exclusion_of_all_present_subjects(original):
+    records,cases,groups,_,_,collection=deepcopy(original)
+    del records['SYN_B']
+    application=intents.compile_application(collection,records,{}, {},release_id='RUN_SYN_NEW')
+    result=policy.project_workload(records,{}, {},[],excluded={'SYN_A'},intent_application=application,decision_intents=collection)
+    assert result['counts']['pending_decision_intents']==1
+    assert 'subject_missing' in result['intent_holds'][0]['reasons']
+
+
+@pytest.mark.parametrize('change,excluded,expected',[
+    ('missing',{'SYN_A','SYN_B'},1),
+    ('changed',{'SYN_A','SYN_B'},1),
+    ('changed',{'SYN_A','SYN_B','SYN_C'},0),
+    ('merge',{'SYN_A','SYN_B'},1),
+    ('merge',{'SYN_A','SYN_B','SYN_C'},0),
+])
+def test_excluded_surviving_edge_does_not_hide_wider_intent_review(change,excluded,expected):
+    records={s:record(s,contact=p) for s,p in
+             [('SYN_A','91230001'),('SYN_B','91230002'),('SYN_C','91230003')]}
+    cases={'AB':case('AB','SYN_A','SYN_B'),'BC':case('BC','SYN_B','SYN_C')}
+    groups=scope('GROUP_OLD',list(records),list(cases))
+    proposal=policy.make_proposal(records,cases,groups,[],**options(records,'RUN_SYN_OLD',
+        partitions={'GROUP_OLD':[['SYN_A'],['SYN_B'],['SYN_C']]}))
+    receipt={'reason':'SYNTHETIC three-subject boundary',
+             'review':{'accepted':True,'proposal_revision':proposal['revision']}}
+    collection=intents.migrate(proposal,records,cases,groups,receipt)
+    del cases['BC']
+    if change=='missing':del records['SYN_C']
+    elif change=='changed':records['SYN_C']['version_id']='changed'
+    else:records['SYN_B']['child_id']=records['SYN_A']['child_id']
+    members=['SYN_A','SYN_B'] if change=='changed' else list(records)
+    groups=scope('GROUP_NEW',members,list(cases))
+    application=intents.compile_application(collection,records,cases,groups,release_id='RUN_SYN_NEW')
+    assert len(application['entries'])==1
+    assert application['entries'][0]['subjects']==['SYN_A','SYN_B']
+    reason={'missing':'subject_missing','changed':'source_pin_changed',
+            'merge':'supported_subgroup_boundary_changed'}[change]
+    assert reason in application['entries'][0]['reasons']
+    before=deepcopy((collection,application))
+    result=policy.project_workload(records,cases,groups,[],excluded=excluded,intent_application=application,decision_intents=collection)
+    assert result['counts']['pending_decision_intents']==expected
+    assert result['counts']['decision_intent_hold_scopes']==expected
+    assert result['counts']['remaining_open_group_scopes']==expected
+    assert len(result['intent_holds'])==expected
+    assert (collection,application)==before
+
+
+@pytest.mark.parametrize('collection_available',[False,True])
+def test_unknown_full_intent_scope_is_not_inferred_from_edge(original,collection_available):
+    records,cases,groups,_,_,collection=deepcopy(original)
+    records['SYN_A']['version_id']='changed'
+    application=intents.compile_application(collection,records,cases,groups,release_id='RUN_SYN_NEW')
+    # An unavailable collection or an unmatched ID cannot establish full exclusion.
+    if collection_available:application['entries'][0]['decision_id']='UNKNOWN_DECISION'
+    result=policy.project_workload(records,cases,groups,[],excluded=set(records),
+        intent_application=application,decision_intents=collection if collection_available else None)
+    assert result['counts']['pending_decision_intents']==1
+
+
+def test_proposal_filters_workload_using_original_collection_without_erasing_history(original):
+    records,cases,groups,_,_,collection=deepcopy(original)
+    records['SYN_A']['version_id']='changed'
+    opts=options(records,'RUN_SYN_NEW')
+    opts['eric_manifest']=policy.exclusion_manifest(list(records.values()),'RUN_SYN_NEW',list(records),
+        operator='SYNTHETIC',at='2026-01-01T00:00:00+00:00')
+    proposal=policy.make_proposal(records,cases,groups,[],decision_intents=collection,**opts)
+    assert proposal['projection']['counts']['pending_decision_intents']==0
+    assert proposal['decision_application']['entries'][0]['status']=='held'
+    assert proposal['decision_intents']==collection

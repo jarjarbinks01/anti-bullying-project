@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
-import selectors
+import time
 import sqlite3
 import subprocess
 import sys
@@ -51,10 +51,11 @@ def owned(environment):
 
 def start(env):
     process = env['owner'].start('reader')
-    with selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ)
-        assert selector.select(5), 'Synthetic reader did not become ready'
-    assert process.stdout.readline() == 'READY\n', process.stderr.read() if process.poll() is not None else ''
+    deadline = time.monotonic() + 5
+    while not (env['state'] / 'synthetic-reader-ready').exists():
+        assert process.poll() is None, 'Synthetic reader exited before becoming ready'
+        assert time.monotonic() < deadline, 'Synthetic reader did not become ready'
+        time.sleep(0.01)
     return process
 
 
@@ -167,7 +168,8 @@ def test_coordinator_death_cannot_turn_a_pending_journal_into_a_receipt(owned):
     config = env['state']/'synthetic-child-config.json'
     save(config, env['cfg'])
     script = '''
-import json,os,sys
+import json,os,sys,time
+from pathlib import Path
 from study2 import coordinated_update as update
 from study2.consumer_owner_fence import OwnedConsumerFence
 cfg=json.load(open(sys.argv[1]))
@@ -176,7 +178,10 @@ plan=json.load(open(planpin['path']))
 owner=OwnedConsumerFence(cfg,plan)
 try:
     process=owner.start('reader')
-    assert process.stdout.readline()=='READY\\n'
+    deadline=time.monotonic()+5
+    while not (Path(cfg['state_dir'])/'synthetic-reader-ready').exists():
+        assert process.poll() is None and time.monotonic()<deadline
+        time.sleep(0.01)
     def die(phase):
         if phase=='after_sqlite_commit':os._exit(61)
     update.publish(cfg,planpin,acceptance,operator='SYNTHETIC PREPARER',owner_fence=owner,fault=die)
@@ -197,3 +202,16 @@ finally:
     with pytest.raises(OwnerFenceError, match='actual_owner_handles_missing'):
         update.recover(env['cfg'], owner_fence=fresh)
     assert tracking(env) == before and file_state(env) == files
+
+
+def test_noisy_owned_reader_does_not_block_and_keeps_protocol_stdout_clean(owned, capfd):
+    env = owned
+    (env['state'] / 'synthetic-noisy-reader').touch()
+    process = start(env)
+    assert process.stdout is None and process.stderr is None
+    assert process.stdin is not None
+    out, err = capfd.readouterr()
+    assert out == ''
+    assert err.count('x') == 2 * 1024 * 1024
+    result = publish(env, owner_fence=env['owner'])
+    assert result['release_id'] == NEW and process.poll() is not None

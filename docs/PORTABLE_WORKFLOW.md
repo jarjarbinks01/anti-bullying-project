@@ -122,7 +122,38 @@ are described in the presentation document. Passwords remain in a separate
 private secret file read only by the launcher at runtime. No secrets are embedded
 in the generated browser assets or source code.
 
+## Review and process contracts
+
+Active intent workload excludes a held decision only when every subject in its
+original intent is excluded. Surviving edge endpoints alone do not establish that
+scope; missing or changed subjects outside the current group can still require
+review. Missing scope information retains the hold. This is a read-only workload
+projection and does not erase decision or application history.
+
+After undo restores an accepted policy, migration follows the immutable,
+hash-verified restoration links to its original acceptance. An undo receipt does
+not become new acceptance. Missing, changed or mismatched generations still fail
+verification; the current source/input/authorization checks remain in force.
+
+The owned reviewed-session protocol writes JSON replies to stdout. Child stdout
+and stderr both inherit the session's stderr, so the owner has no unread output
+pipes. A caller that captures session stderr must drain it or redirect it to an
+intentional file, as with any child process. The stdin ownership channel remains
+separate; no background logging service is required.
+
+Browser tab clicks and hash/history changes use one navigation path. Back/Forward
+updates the rendered tab while retaining filters and explicit exclusions OFF,
+including during lazy loading. Re-selecting the same tab does not remount it.
+
 ## Recovery
+
+Native checkpoints support DELETE journal mode for both main and review SQLite
+databases. Under the existing read transactions, save checks each journal mode
+before hashing source files or considering archive reuse. Other modes, including
+WAL, are refused without changing the mode, deleting sidecars or replacing the
+previous checkpoint. This keeps byte-based reuse consistent with the locked
+snapshot. If a workspace uses another mode, resolve it through separately planned
+maintenance; never remove WAL files to bypass the refusal.
 
 Checkpoints include nested Python presentation adapters, browser assets and the
 root entry bridge, not only top-level Python modules. A configured private trust
@@ -133,7 +164,11 @@ fail instead of quietly pointing back to the old workspace.
 Restoring files is not automatic activation. Validate the restored workspace,
 review its local selector/configuration and explicitly select it through the
 existing workflow. Do not replace the running frozen installation merely because
-a new source commit exists.
+a new source commit exists. Historical code may still be required by a recovery
+inventory even when current science does not import it. Keep those assets and
+release evidence until the intended recovery path has been demonstrated. A real
+transition must coordinate the launcher, interpreter/package binding, working
+directory, dispatcher/selector and configuration, not only an entrypoint pointer.
 
 ## Focused verification
 
@@ -151,7 +186,7 @@ compared external historical checkout copies now compare synthetic
 unprepared/eager and prepared/deferred results, and do not claim old-source
 parity. The normal public suite does not require retained private fixture folders. The optional manual-exclusion validation matrix and frozen-fixture manual-exclusion UI/schema/Streamlit and paired-table UI tests skip unless their required synthetic bindings are explicitly supplied (validation: `STUDY2_MANUAL_FIXTURE_ROOT` for r1; manual UI: `MANUAL_UI_HASH_JS` and `MANUAL_UI_EVIDENCE_DIR`, plus `MANUAL_UI_CORE_FIXTURE_DIR` pointing to core_r2 for core-generated UI/schema and Streamlit eligibility checks and `MANUAL_UI_ORIGINAL_CORE_FIXTURE_DIR` pointing to core_r1 for empty/all-excluded schema checks; paired table: `PAIRED_TABLE_BASELINE_ASSET` and `PAIRED_TABLE_EVIDENCE_DIR`, with `PAIRED_TABLE_FROZEN_SD=1` for raw-SD parity); those skips are not passing checks.
 
-Some review findings are independent follow-up work, including browser-history
-navigation, excluded-intent workload counts, undo acceptance lineage, undrained
-owned-consumer output and the conditional WAL checkpoint contract. Consolidation
-does not claim these unrelated behavior fixes or an exhaustive full-suite pass.
+The five robustness fixes above have focused regression coverage and independent
+source review. [Project state](PROJECT_STATE.md#robustness-follow-up) records the
+counts and limits. Targeted verification is not an exhaustive final full-suite
+pass or proof of compatibility with the active private installation.

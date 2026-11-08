@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import tempfile
 
 import pytest
 
@@ -50,7 +51,7 @@ def message(process):
         selector.register(process.stdout,selectors.EVENT_READ)
         assert selector.select(8),'Selected entry did not respond'
     line=process.stdout.readline()
-    assert line,process.stderr.read() if process.poll() is not None else 'Entry closed stdout'
+    assert line,process.stderr.read() if process.poll() is not None and process.stderr is not None else 'Entry closed stdout'
     return json.loads(line)
 
 
@@ -59,9 +60,12 @@ def command(process,value):
     return message(process)
 
 
-def session(env):
+def session(env, *, stderr=None):
+    # Diagnostics must have an actual sink, not an unread parent-owned pipe.
+    owned_diagnostics = tempfile.TemporaryFile(mode='w+') if stderr is None else None
     process=subprocess.Popen(argv(env,'reviewed-session'),stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,text=True,start_new_session=True)
+        stderr=owned_diagnostics if owned_diagnostics is not None else stderr,text=True,start_new_session=True)
+    process.test_diagnostics = owned_diagnostics
     try:
         assert message(process)['status']=='owned_session_ready'
         # Observe the actual native reader lock, rather than treating Popen or
@@ -86,6 +90,7 @@ def close(process):
         process.communicate(timeout=8)
     for stream in (process.stdin,process.stdout,process.stderr):
         if stream is not None and not stream.closed:stream.close()
+    if process.test_diagnostics is not None:process.test_diagnostics.close()
     assert process.returncode==0
 
 
@@ -206,15 +211,17 @@ def test_owned_session_loss_leaves_gate_closed_and_fresh_entry_cannot_adopt(owne
         assert command(process,'publish')['status']=='command_failed'
         blocker.rollback();blocker.close();blocker=None
         process.stdin.close();process.stdin=None
-        _,error=process.communicate(timeout=8)
-        assert process.returncode!=0 and 'gate remains closed' in error
+        process.communicate(timeout=8)
+        process.test_diagnostics.seek(0)
+        assert process.returncode!=0 and 'gate remains closed' in process.test_diagnostics.read()
         result=invoke(env,'reviewed-recover');assert result.returncode!=0
         assert 'reviewed_empty_owner_scope_required' in result.stderr
         assert publication(env)==OLD and binding._json(env['selection'])['coordinated_update_gate']
     finally:
         if blocker is not None:blocker.rollback();blocker.close()
         if process.poll() is None:process.terminate();process.wait(timeout=5)
-        for stream in (process.stdout,process.stderr):stream.close()
+        for stream in (process.stdout,process.stderr,process.test_diagnostics):
+            if stream is not None:stream.close()
 
 
 def test_actual_entry_requires_reviewed_dispatcher_and_rejects_wrong_scope(owned):
@@ -229,3 +236,21 @@ def test_actual_entry_requires_reviewed_dispatcher_and_rejects_wrong_scope(owned
     result=invoke(env,'reviewed-session');assert result.returncode!=0
     assert 'reviewed_guarded_runtime_required' in result.stderr
     assert publication(env)==OLD and not (env['state']/update.JOURNAL).exists()
+
+
+def test_noisy_owned_session_keeps_json_protocol_usable(owned, tmp_path):
+    env = reviewed(owned, owned['plan'])
+    (env['state'] / 'synthetic-noisy-reader').touch()
+    with (tmp_path / 'session-diagnostics.log').open('w+') as diagnostics:
+        process = session(env, stderr=diagnostics)
+        try:
+            deadline = time.monotonic() + 5
+            while not (env['state'] / 'synthetic-reader-ready').exists():
+                assert process.poll() is None and time.monotonic() < deadline
+                time.sleep(0.01)
+            assert command(process, 'publish')['release_id'] == NEW
+            assert command(process, 'publish')['read_only']
+        finally:
+            close(process)
+        diagnostics.seek(0)
+        assert diagnostics.read().count('x') == 2 * 1024 * 1024

@@ -270,7 +270,15 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                 p=state/name
                 if not p.is_file():continue
                 db=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True);db.row_factory=sqlite3.Row
-                db.execute('BEGIN');db.execute('SELECT count(*) FROM sqlite_master').fetchone();sources[name]=db;connections.append(db)
+                connections.append(db)
+                db.execute('BEGIN');db.execute('SELECT count(*) FROM sqlite_master').fetchone()
+                # Reuse is keyed by main-file bytes, not WAL contents. The held
+                # DELETE-mode read transaction keeps those bytes stable through
+                # hashing and backup; never change the live journal mode here.
+                mode=db.execute('PRAGMA journal_mode').fetchone()[0].lower()
+                if mode!='delete':
+                    raise PipelineError('Checkpoint requires DELETE journal mode: '+name+' uses '+mode.upper())
+                sources[name]=db
             if not force and not records_v2(sources['study2.sqlite']):return {'legacy_storage':True}
             source_hashes={name:file_hash(state/name) for name in sources}
             from .common import digest

@@ -408,7 +408,8 @@ def _local_snapshot_locked(bundle_path,root,*,include_cases=False):
         need(excluded==eric|policy_ids,'combined_flag_union_mismatch')
         projection=project_workload(d['records'],d['cases'],d['groups'],d['decisions'],excluded=excluded,
                                     partitions=active['proposal']['partitions'],
-                                    intent_application=active['proposal'].get('decision_application'))
+                                    intent_application=active['proposal'].get('decision_application'),
+                                    decision_intents=active['proposal'].get('decision_intents'))
         status='applied_local_policy'
     else:
         # OFF/undone does not apply generic closures merely because a classifier
@@ -475,24 +476,39 @@ def _carry_from_active(active,data,options):
     return c
 
 
+def _intent_acceptance_receipt(active):
+    """Follow immutable undo restoration links, not the superseded current head."""
+    proposal=active['proposal'];generation=active;seen=set()
+    while True:
+        pointer=generation['pointer'];receipt=generation['receipt'];control=generation['policy']
+        need(pointer['generation'] not in seen,'intent_origin_lineage_cycle')
+        seen.add(pointer['generation'])
+        need(generation['proposal']==proposal and control['policy_active'] and
+             control['proposal_revision']==receipt['proposal_revision']==proposal['revision'] and
+             receipt['release_id']==control['release_id']==proposal['base']['release_id'],
+             'intent_origin_generation_binding')
+        if receipt.get('operation')!='undo':
+            return receipt
+        restored=receipt.get('restored_pointer')
+        need(isinstance(restored,dict),'intent_origin_restoration_missing')
+        generation=_read_named_generation(active['folder'].parent,restored)
+
+
 def _migrate_active_intents(active,source):
     """The old generation and pinned source view jointly authorise migration."""
     from .group_decision_intents import migrate,validate,sealed,FORMAT
     proposal=active['proposal']
     need(isinstance(proposal,dict),'intent_origin_proposal_required')
     base=proposal['base']
-    options=source['_proposal_options'];receipt=active['receipt'];control=active['policy']
-    need(control['policy_active'] and control['proposal_revision']==proposal['revision'] and
-         receipt['proposal_revision']==proposal['revision'] and
-         receipt['release_id']==control['release_id']==base['release_id'],
-         'intent_origin_generation_binding')
+    options=source['_proposal_options'];receipt=_intent_acceptance_receipt(active)
     need(all(base[k]==options[k] for k in ('release_id','main_revision','rules_hash')) and
          base['eric_revision']==source['eric_manifest']['revision'] and
          base['view_revision']==sha({k:source[k] for k in ('records','cases','groups','decisions')}) and
          base['inventory_revision']==inventory_revision(list(source['records'].values())) and
          proposal['partitions']==source['partitions'] and proposal['authorization']==source['authorization'],
          'intent_origin_inputs_changed')
-    migrated=migrate(proposal,source['records'],source['cases'],source['groups'],receipt)
+    migrated=migrate(proposal,source['records'],source['cases'],source['groups'],
+                     receipt)
     if 'decision_intents' not in proposal:
         return migrated
     prior=validate(proposal['decision_intents'])

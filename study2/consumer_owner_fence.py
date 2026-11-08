@@ -135,9 +135,11 @@ class OwnedConsumerFence:
         journal = self.state / 'COORDINATED_UPDATE.json'
         if journal.exists():
             need(read_json(journal).get('status') == 'complete', 'owner_start_gate_closed')
+        # Keep stdout free for reviewed-session JSON replies. Child diagnostics
+        # inherit stderr instead of filling pipes that the owner never drains.
         process = subprocess.Popen(self.specs[owner]['argv'], cwd=self.state,
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True,
+                                   stdin=subprocess.PIPE, stdout=2,
+                                   stderr=None, text=True,
                                    start_new_session=True)
         self._processes[owner] = process
         return process

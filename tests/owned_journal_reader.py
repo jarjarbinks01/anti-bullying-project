@@ -16,5 +16,10 @@ with (state / 'writer.lock').open('a') as lock:
     with sqlite3.connect((state / 'study2.sqlite').as_uri() + '?mode=ro', uri=True) as db:
         db.execute('BEGIN')
         assert db.execute('SELECT release_id FROM publication WHERE singleton=1').fetchone()
+        if (state / 'synthetic-noisy-reader').exists():
+            for stream in (sys.stdout, sys.stderr):
+                stream.write('x' * (1024 * 1024) + '\n')
+                stream.flush()
+        (state / 'synthetic-reader-ready').write_text('ready')
         print('READY', flush=True)
         sys.stdin.readline()
