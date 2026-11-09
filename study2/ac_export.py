@@ -178,6 +178,10 @@ def _cleanup(output, directory_identity, owned):
         pass
 
 
+from .flag_binding import guarded_consumer
+
+
+@guarded_consumer
 def export_student_ac(cfg, output: Path, *, manifest_path=None, enabled=False,
                       dataset_version='student_ac_full_v1'):
     """Export one wide row per fixed student AC pair into a new local directory.
@@ -190,6 +194,10 @@ def export_student_ac(cfg, output: Path, *, manifest_path=None, enabled=False,
     _need(type(enabled) is bool, 'enabled must be boolean')
     _need(isinstance(dataset_version, str) and bool(dataset_version.strip()), 'dataset version required')
     _need(not enabled or manifest_path is not None, 'accepted exclusion manifest required for ON')
+    from .flag_binding import resolve_current
+    bound = resolve_current(cfg)
+    if bound is not None and enabled:
+        _need(Path(manifest_path).resolve() == bound.resolve(), 'managed exclusion manifest mismatch')
     state = Path(cfg['state_dir']).expanduser().resolve()
     requested_output = Path(output).expanduser()
     if requested_output.exists() or requested_output.is_symlink():
@@ -300,6 +308,8 @@ def export_student_ac(cfg, output: Path, *, manifest_path=None, enabled=False,
         _need(all(file_hash(Path(path)) == pin for path, pin in source_pins.items()), 'source changed during export')
         _need(manifest_path is None or file_hash(manifest_path) == manifest_pin, 'manifest changed during export')
         _need(_published_release(state) == release, 'publication changed during export')
+        if bound is not None and enabled:
+            _need(resolve_current(cfg) == bound, 'managed exclusion binding changed during export')
         return {**receipt, 'output_dir': str(output), 'csv_path': str(csv_path),
                 'manifest_path': str(manifest_output), 'manifest_sha256': file_hash(manifest_output)}
     except BaseException:

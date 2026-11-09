@@ -275,3 +275,45 @@ def test_preserve_all_retains_every_prior_checkpoint_and_ledger(tmp_path, monkey
     monkeypatch.setattr(checkpoints, '_prune_full_copies', forbidden_prune)
     checkpoints._finish_retention(cfg, state / 'checkpoints/CHECKPOINT_new')
     assert {str(p.relative_to(state)): p.read_bytes() for p in state.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('name', ['study2.sqlite', 'review.sqlite'])
+@pytest.mark.parametrize('force', [False, True])
+def test_wal_checkpoint_refuses_before_hash_reuse_without_changing_live_mode(project, monkeypatch, name, force):
+    from study2 import checkpoints
+    from study2.review_core import workspace
+    cfg, _, _, _ = project
+    execute(project)
+    workspace(cfg).close()
+    save_checkpoint(cfg)
+    state = Path(cfg['state_dir'])
+    before = latest(cfg)
+    pending = state / 'CHECKPOINT_PENDING.json'
+    pending.write_text('{"reason":"synthetic pending checkpoint"}')
+    pending_bytes = pending.read_bytes()
+    connection = sqlite3.connect(state / name)
+    try:
+        assert connection.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+        connection.execute('PRAGMA wal_autocheckpoint=0')
+        connection.execute('CREATE TABLE synthetic_wal_commits(value)')
+        connection.commit()
+        main_hash = file_hash(state / name)
+        connection.execute('INSERT INTO synthetic_wal_commits VALUES(1)')
+        connection.commit()
+        assert file_hash(state / name) == main_hash
+        wal = state / (name + '-wal')
+        wal_hash = file_hash(wal)
+        # Refuse before even deciding reuse or writing a replacement archive.
+        def forbidden(*args, **kwargs):
+            raise AssertionError('Unsupported journal mode reached checkpoint reuse')
+        monkeypatch.setattr(checkpoints, 'checkpoint_manifest', forbidden)
+        with pytest.raises(PipelineError, match='requires DELETE journal mode: ' + name + ' uses WAL'):
+            save_checkpoint(cfg, force=force)
+        assert latest(cfg) == before and Path(before['path']).is_dir()
+        assert pending.read_bytes() == pending_bytes
+        assert not list((state / 'checkpoints').glob('.building_*'))
+        assert connection.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        assert connection.execute('SELECT value FROM synthetic_wal_commits').fetchall() == [(1,)]
+        assert file_hash(state / name) == main_hash and file_hash(wal) == wal_hash
+    finally:
+        connection.close()

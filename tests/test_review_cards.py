@@ -254,10 +254,28 @@ def test_competing_candidate_group_changes_require_new_review(project, change_ki
 def test_pipeline_busy_can_stage_but_cannot_apply(project):
     cfg,_=project
     pkg=package(project)
-    with writer_lock(Path(cfg['state_dir'])):
+    import fcntl
+    state=Path(cfg['state_dir'])
+    # An independent open-file description competes with the apply writer.
+    # Reentering writer_lock in its owning thread intentionally borrows it.
+    with (state/'writer.lock').open('a') as competitor:
+        fcntl.flock(competitor,fcntl.LOCK_EX|fcntl.LOCK_NB)
         batch=approved(cfg,pkg)
         assert core.apply_batch(cfg,batch['batch_id'])['state']=='approved'
+        main=connect(state)
+        try:
+            for table in ('decisions','labels','review_applications'):
+                assert main.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]==0
+        finally:
+            main.close()
     assert core.apply_batch(cfg,batch['batch_id'])['state']=='applied'
+    main=connect(state)
+    try:
+        assert main.execute('SELECT COUNT(*) FROM decisions').fetchone()[0]==2
+        assert main.execute('SELECT COUNT(*) FROM labels').fetchone()[0]==3
+        assert main.execute('SELECT COUNT(*) FROM review_applications').fetchone()[0]==1
+    finally:
+        main.close()
 
 
 def test_recovery_after_main_commit(project,monkeypatch):

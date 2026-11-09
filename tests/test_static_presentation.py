@@ -86,7 +86,13 @@ def test_every_export_uses_the_updated_presentation_and_valid_javascript(tmp_pat
                  published_at='2026-01-01T00:00:00Z', views=[])
     folder = tmp_path/'site'
     write_site(value, folder)
-    assert (folder/'index.html').read_text() == HTML
+    # The exporter supplies the eligibility sidecar before the app, including
+    # its explicit unavailable/null value for a snapshot without a manifest.
+    expected_html = HTML.replace('<script defer src="app.js">',
+        '<script defer src="manual-exclusion.js"></script><script defer src="app.js">')
+    assert (folder/'index.html').read_text() == expected_html
+    assert (folder/'manual-exclusion.js').read_text().endswith(
+        'window.STUDY2_MANUAL_EXCLUSION=null;\n')
     assert (folder/'app.js').read_text() == APP_JS
     assert (folder/'styles.css').read_text() == STYLES
     assert 'sample-sidebar' in STYLES and 'position:relative' in STYLES
@@ -118,8 +124,11 @@ def test_first_tab_requires_explicit_unsuppressed_snapshot_before_validating_or_
 const S=JSON.parse(require('fs').readFileSync(0,'utf8'));S.release_id='synthetic-policy';
 const window={STUDY2_SCOPE_EXPORT:{format:'study2_static_scope_export_v1',status:'available',
   release_id:S.release_id,index_revision:'a'.repeat(64),index:{meta:{release_id:S.release_id}}}};
-const calls={validate:0,mount:0,notices:[]},root={append(){}},tabs=['Data quality & progress'];
-let qualityMount=null,qualitySelection=null;
+const calls={validate:0,mount:0,notices:[],workload:0},root={append(){}},tabs=['Data quality & progress'];
+const activeScope=window.STUDY2_SCOPE_EXPORT,eligibility=null;
+let qualityMount=null,qualitySelection=null,qualityUIState=null;
+// This unit test isolates scope mounting from the separate workload presenter.
+function reviewWorkload(){calls.workload++;}
 function el(){return {};};function pageHeading(){};function notice(host,message){calls.notices.push(message);}
 const Study2Scope={validate(){calls.validate++;}};
 const Study2Quality={mount(){calls.mount++;return {};}};
@@ -129,16 +138,26 @@ overview();console.log(JSON.stringify(calls));
     result=subprocess.run([node,'-e',driver],input=json.dumps(settings),text=True,capture_output=True,check=True)
     calls=json.loads(result.stdout)
     allowed=type(settings.get('minimum_cell_n')) is int and settings.get('minimum_cell_n')==0 and settings.get('small_sample_policy')=='none'
+    assert calls['workload'] == 1
     assert (calls['validate'],calls['mount'])==((1,1) if allowed else (0,0))
     assert len(calls['notices'])==(0 if allowed else 1)
     if not allowed:assert 'unavailable' in calls['notices'][0] and 'aggregate' in calls['notices'][0]
+
+
+def csv_model():
+    """Extract the real CSV and provenance helpers for a baseline/OFF context."""
+    start = APP_JS.index('function releaseMetadata(){')
+    end = APP_JS.index('\n}', start) + 2
+    provenance = APP_JS[start:end]
+    function = next(line for line in APP_JS.splitlines() if line.startswith('function csv('))
+    return provenance + '\nconst eligibility=null;\n' + function
 
 
 def test_csv_keeps_masked_cells_and_the_selected_analysis_context():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node is required for the static JavaScript display checks')
-    function = next(line for line in APP_JS.splitlines() if line.startswith('function csv('))
+    function = csv_model()
     script = function + '''
 const S={release_id:'synthetic-release',generated_at:'2026-01-01'};
 const page=1, parent={};
@@ -162,7 +181,7 @@ def g12_csv(rows, columns, *, download_scope=None, **selection):
     node = shutil.which('node')
     if not node:
         pytest.skip('Node is required for numeric download checks')
-    function = next(line for line in APP_JS.splitlines() if line.startswith('function csv('))
+    function = csv_model()
     state = dict(mode='acbd', role='student', mainstream=False, source='all', group='all',
                  reading='overview', section='scales', family='all', result='table', variable='SEC_total',
                  trend_variable='PHQ_total', from_='2025-01', to='2025-03', batch=False)

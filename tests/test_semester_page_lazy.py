@@ -79,6 +79,28 @@ async function currentCsv(page){const down=page.waitForEvent('download');await p
  assert.equal(await page.locator('[data-control="semester:semesters:S2"]').isChecked(),false);assert.equal(await page.locator('[data-control="semester:waves:T1"]').isChecked(),false);assert.equal(await startDate.inputValue(),narrowStart);
  assert(requests.includes('/period-semester-off-abcd-student.json')&&requests.includes('/period-semester-off-abcd-parent.json'));
  const offRecord=await currentCsv(page);assert.equal(offRecord.eligibility_mode,'off');assert.equal(offRecord.eligibility_revision,'');assert.equal(offRecord.filter_source_codes,'qualtrics');assert.equal(offRecord.source_selection_status,'single');
+ // Real history traversal must update both the active tab and the rendered
+ // semester scope without fetching full data or resetting explicit OFF.
+ await page.getByRole('button',{name:'Independent parent analysis',exact:true}).click();await independentReady(page);
+ await page.goBack();await semesterReady(page);
+ assert.equal(new URL(page.url()).hash,'#page=1');
+ assert.equal(await page.locator('#nav [aria-current="page"]').innerText(),'Descriptive statistics');
+ assert.equal(await page.locator('#manual-exclusion-enabled').isChecked(),false);
+ assert.equal(await page.locator('[data-control="semester:semesters:S2"]').isChecked(),false);
+ assert.equal(await page.locator('[data-control="semester:waves:T1"]').isChecked(),false);
+ assert.equal(await startDate.inputValue(),narrowStart);assert.equal((await currentCsv(page)).filter_source_codes,'qualtrics');
+ await page.goForward();await independentReady(page);
+ assert.equal(new URL(page.url()).hash,'#page=2');
+ assert.equal(await page.locator('#nav [aria-current="page"]').innerText(),'Independent parent analysis');
+ assert.equal(await page.locator('#manual-exclusion-enabled').isChecked(),false);noLegacy();
+ await page.goBack();await semesterReady(page);
+ // Clicking the selected tab must not remount it or create another entry.
+ const historyLength=await page.evaluate(()=>history.length);
+ const panel=await page.locator('.semester-panel').first().elementHandle();
+ await page.getByRole('button',{name:'Descriptive statistics',exact:true}).click();
+ assert.equal(await page.evaluate(()=>history.length),historyLength);
+ assert(await panel.evaluate(node=>node.isConnected));
+
  await page.locator('#manual-exclusion-enabled').click();await page.locator('.manual-eligibility[data-mode=on]').waitFor();await semesterReady(page);
  assert.equal(await page.locator('[data-control="semester:semesters:S2"]').isChecked(),false);assert.equal(await page.locator('[data-control="semester:waves:T1"]').isChecked(),false);assert.equal(await startDate.inputValue(),narrowStart);
  await page.locator('#manual-exclusion-enabled').click();await page.locator('.manual-eligibility[data-mode=off]').waitFor();await semesterReady(page);noLegacy();
@@ -103,7 +125,10 @@ async function currentCsv(page){const down=page.waitForEvent('download');await p
  await race.getByRole('button',{name:'Descriptive statistics',exact:true}).click();await semesterReady(race);
  await race.locator('#manual-exclusion-enabled').click();await race.locator('.manual-eligibility[data-mode=off]').waitFor();await semesterReady(race);
  const latch=arm();await race.getByRole('button',{name:'Research overview',exact:true}).click();await latch.requested;
- await race.getByRole('button',{name:'Independent parent analysis',exact:true}).click();assert.equal(new URL(race.url()).hash,'#page=2');latch.release();
+ await race.getByRole('button',{name:'Independent parent analysis',exact:true}).click();assert.equal(new URL(race.url()).hash,'#page=2');
+ await race.goBack();await race.waitForFunction(()=>document.querySelector('#nav [aria-current="page"]')?.textContent==='Descriptive statistics');
+ await race.goForward();await race.waitForFunction(()=>document.querySelector('#nav [aria-current="page"]')?.textContent==='Independent parent analysis');
+ latch.release();
  await independentReady(race);assert.equal(await race.locator('#manual-exclusion-enabled').isChecked(),false);await race.close();
 
  // A failed explicitly requested legacy load must leave a working, correctly
@@ -123,7 +148,7 @@ async function currentCsv(page){const down=page.waitForEvent('download');await p
  assert(!requests.some(x=>x.startsWith('/period-semester-')));noLegacy();await badBoot.close();
  requests.length=0;bad=malformed(true);const badOff=await context.newPage();await badOff.goto(base+'/#page=1');await badOff.getByRole('button',{name:'Reload page',exact:true}).waitFor();
  assert(!requests.some(x=>x.startsWith('/period-semester-')));noLegacy();await badOff.close();invalid=false;
- await context.close();console.log(JSON.stringify({status:'passed',cold_trends:true,off_on_bootstrap:true,quality_off:true,independent:true,csv_source_metadata:true,legacy_deferred:true,race:true,tamper_rejected:true,invalid_boot_rejected:true}));
+ await context.close();console.log(JSON.stringify({status:'passed',cold_trends:true,off_on_bootstrap:true,quality_off:true,independent:true,csv_source_metadata:true,legacy_deferred:true,back_forward:true,repeated_navigation:true,race:true,tamper_rejected:true,invalid_boot_rejected:true}));
 }finally{if(releaseHeld)releaseHeld();if(browser)await browser.close();if(server)await new Promise(resolve=>server.close(resolve));}})().catch(e=>{console.error(e.stack);process.exitCode=1;});
 '''
 

@@ -12,9 +12,9 @@ import re
 import numpy as np
 
 from .common import PipelineError
-from .descriptive_spec import GROUPS, variables
+from .presentation.descriptive_spec import GROUPS, variables
 from .descriptive_trends import DATE_LABELS, TIMEZONE, dated_rows
-from .descriptives import values_and_status
+from .presentation.descriptives import values_and_status
 from .static_grade import CODES as GRADES, moments
 from .static_sources import PARTITIONS as SOURCES, source_code
 

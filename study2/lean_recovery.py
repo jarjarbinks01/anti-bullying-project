@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 from .common import PipelineError, atomic_json, digest, file_hash
@@ -21,7 +22,8 @@ PRESENTATION_MODULES = frozenset({
 CONTROL_DIRECTORIES = ('analysis_eligibility', 'review_dispositions')
 CONTROL_FILES = ('CURRENT_REVIEW_DISPOSITION.json',)
 ENVIRONMENT_PATHS = ('STUDY2_MANUAL_EXCLUSION_MANIFEST',
-                     'STUDY2_CURRENT_REVIEW_WORKLOAD', 'STUDY2_REVIEW_STATE_DIR')
+                     'STUDY2_CURRENT_REVIEW_WORKLOAD', 'STUDY2_REVIEW_STATE_DIR',
+                     'STUDY2_FLAG_CONTROL', 'STUDY2_GROUP_POLICY_POINTER')
 
 
 def enabled(cfg):
@@ -64,6 +66,20 @@ def record_review_cache(cfg, revision, path, checksum):
         'source_revision': revision, 'path': str(path), 'snapshot_sha256': checksum})
 
 
+def finder_metadata(path):
+    """Ignore only ordinary owned Finder metadata, never links or directories."""
+    path = Path(path)
+    if path.name != '.DS_Store':
+        return False
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise PipelineError('Finder metadata must be an owned regular file')
+    return True
+
+
 def recovery_assets(cfg):
     """Add the complete state control directories plus explicit external assets.
 
@@ -98,9 +114,15 @@ def recovery_assets(cfg):
         for p in sorted(path.rglob('*')):
             if p.is_symlink():
                 raise PipelineError('Recovery dependency contains a symlink: ' + str(p))
+            if finder_metadata(p):
+                continue
             if p.is_file():
                 add(p, relative / p.relative_to(path))
 
+    if (state/'coordinated_updates').exists():
+        tree(state/'coordinated_updates', Path('coordinated_updates'))
+    if (state/'COORDINATED_UPDATE.json').exists():
+        add(state/'COORDINATED_UPDATE.json', Path('COORDINATED_UPDATE.json'))
     for name in CONTROL_DIRECTORIES:
         if (state / name).exists():
             tree(state / name, Path(name))

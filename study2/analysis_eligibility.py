@@ -96,11 +96,7 @@ def validate_manifest(manifest, records, release_id):
         'approved_by', 'approved_at', 'copy_policy', 'entries'}, 'invalid_manifest_shape')
     _need(manifest['format'] == MANIFEST_FORMAT and manifest['status'] == 'accepted',
           'accepted_manifest_required')
-    _need(manifest['release_id'] == release_id, 'manifest_release_mismatch')
-    _need(_hash(manifest['inventory_revision']) and
-          manifest['inventory_revision'] == inventory_revision(rows), 'manifest_inventory_mismatch')
-    _need(_hash(manifest['revision']) and manifest['revision'] == manifest_revision(manifest),
-          'manifest_revision_mismatch')
+    _validate_manifest_inventory(manifest, rows, release_id)
     _need(isinstance(manifest['approved_by'], str) and manifest['approved_by'].strip(),
           'manifest_approval_required')
     try:
@@ -108,6 +104,20 @@ def validate_manifest(manifest, records, release_id):
         _need(approved.tzinfo is not None, 'manifest_approval_date_invalid')
     except (ValueError, TypeError, AttributeError):
         raise EligibilityError('manifest_approval_date_invalid') from None
+    return _validate_manifest_entries(manifest, rows, by_id)
+
+
+def _validate_manifest_inventory(manifest, rows, release_id):
+    """Common identity and revision checks after the caller validates shape."""
+    _need(manifest['release_id'] == release_id, 'manifest_release_mismatch')
+    _need(_hash(manifest['inventory_revision']) and
+          manifest['inventory_revision'] == inventory_revision(rows), 'manifest_inventory_mismatch')
+    _need(_hash(manifest['revision']) and manifest['revision'] == manifest_revision(manifest),
+          'manifest_revision_mismatch')
+
+
+def _validate_manifest_entries(manifest, rows, by_id):
+    """Common exclusion/version/copy checks, independent of approval status."""
     _need(manifest['copy_policy'] == COPY_POLICY and isinstance(manifest['entries'], list),
           'manifest_copy_policy_invalid')
     excluded = set()
@@ -212,9 +222,16 @@ class Projection:
 def project_eligibility(records, analysis, parent_longitudinal, manifest, release_id, *,
                         enabled=True, panel=None):
     """OFF does not inspect an optional manifest; no in-place changes or reselection."""
+    return _project_eligibility(records, analysis, parent_longitudinal, manifest, release_id,
+                                enabled=enabled, panel=panel, validator=validate_manifest)
+
+
+def _project_eligibility(records, analysis, parent_longitudinal, manifest, release_id, *,
+                         enabled, panel, validator):
+    """Shared projection engine; public entry points choose their own validator."""
     rows, by_id = _records(records)
     original = _members(rows, analysis, parent_longitudinal)
-    excluded = validate_manifest(manifest, rows, release_id) if enabled else frozenset()
+    excluded = validator(manifest, rows, release_id) if enabled else frozenset()
     retained = {code: tuple(m for m in members if not excluded.intersection(m))
                 for code, members in original.items()}
     frame = analysis.loc[~analysis.submission_id.isin(excluded)].copy(deep=True)

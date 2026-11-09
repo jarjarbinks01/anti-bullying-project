@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import uuid
@@ -15,7 +16,7 @@ from .common import PipelineError, atomic_json, digest, dumps, file_hash, secure
 from .matching import assign_children, link_records, select_waves
 from .outputs import write_excel, write_outputs
 from .review import active_decisions, apply_field_decisions, validation_report
-from .store import backup, backup_path, connect, current, ingest, writer_lock
+from .store import backup, connect, current, ingest, writer_lock, verify_backup_integrity
 from .storage import read_records, store_record, record_value_cache
 from .artifacts import artifact_cache, freeze_file, logical_hash
 
@@ -37,11 +38,15 @@ def fingerprint(cfg, manifest, db):
                    "dictionary": file_hash(Path(cfg["state_dir"]) / "school_dictionary.xlsx"),
                    "decisions": [d["payload"] for d in active_decisions(db)],
                    "labels": [dict(r) for r in db.execute("SELECT * FROM labels ORDER BY case_id")],
-                   "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy"), cfg.get("parent_wave_policy"), cfg.get("bd_pairing_policy")],
+                   "rules": [cfg["duplicate_days"], cfg["minimum_followup_days"], cfg.get("matching_policy", {}), cfg.get("bd_requires_same_adult", False), cfg.get("date_policy"), cfg.get("parent_wave_policy")]
+                       + ([cfg["bd_pairing_policy"]] if cfg.get("bd_pairing_policy") is not None else []),
                    "formatted_descriptive_reports": cfg.get('output_policy', {}).get('formatted_descriptive_reports', 'eager'),
                    "source_folder": cfg.get("source_folder", "1.1_raw_file"), "source_registry": cfg["sources"],
                    "legacy_sources": {str(p.relative_to(cfg["project_root"])):file_hash(p) for p in legacy_files(cfg)},
-                   "permanent_registration": administrative_fingerprint(db)})
+                   "permanent_registration": administrative_fingerprint(db),
+                   "approved_source_time_transitions": [dict(r) for r in db.execute(
+                       "SELECT * FROM approved_source_time_transitions ORDER BY sequence")]
+                       if db.execute("SELECT 1 FROM sqlite_master WHERE name='approved_source_time_transitions' AND type='table'").fetchone() else []})
 
 
 def baseline_comparison(cfg, summary):
@@ -294,13 +299,7 @@ def verify_release(db, release_id):
         if not (path/'backup.retention.json').exists():
             raise PipelineError('Full recovery backup is unavailable without a retention record')
         return result
-    with backup_path(path / 'backup.sqlite', expected_backup) as restored:
-        snapshot = sqlite3.connect(restored.resolve().as_uri() + '?mode=ro', uri=True)
-        try:
-            if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise PipelineError("Release backup failed integrity check")
-        finally:
-            snapshot.close()
+    verify_backup_integrity(path / 'backup.sqlite', expected_backup)
     return result
 
 
@@ -358,22 +357,42 @@ def publish_release(db, cfg, release_id, rollback=False):
         if fingerprint(cfg, manifest['inputs'], db) != manifest['fingerprint']:
             raise PipelineError('Source, rules or permanent registration changed after validation; rerun before publication')
     tracking_backup = backup_tracking(db, cfg, "before_publish_" + release_id)
-    pointer = Path(cfg["release_dir"]) / "CURRENT.json"
-    previous = json.loads(pointer.read_text()) if pointer.exists() else None
-    try:
-        with db:
-            db.execute("INSERT OR REPLACE INTO publication VALUES(1,?)", (release_id,))
-            db.execute("UPDATE runs SET status='published' WHERE run_id=?", (row["run_id"],))
-            if not rollback:
-                publish_memberships(db, row["run_id"])
-            tracking_after = backup_tracking(db, cfg, "after_publish_" + release_id, promote=False)
-            atomic_json(pointer, {"release_id": release_id, "path": row["path"], "published_at": utcnow()})
-    except Exception:
-        if previous is not None:
-            atomic_json(pointer, previous)
-        else:
-            pointer.unlink(missing_ok=True)
-        raise
+    from .flag_binding import MANIFEST_ENV, guarded_publication
+    # Complete and pin exclusions before the authoritative publication row
+    # changes. Old and new generations are selected by that row, not by a
+    # separately switched manifest pointer.
+    with guarded_publication(cfg, row['path'], release_id) as bound_manifest:
+        pointer = Path(cfg["release_dir"]) / "CURRENT.json"
+        previous = json.loads(pointer.read_text()) if pointer.exists() else None
+        previous_manifest = os.environ.get(MANIFEST_ENV)
+        try:
+            with db:
+                db.execute("INSERT OR REPLACE INTO publication VALUES(1,?)", (release_id,))
+                db.execute("UPDATE runs SET status='published' WHERE run_id=?", (row["run_id"],))
+                if not rollback:
+                    publish_memberships(db, row["run_id"])
+                tracking_after = backup_tracking(db, cfg, "after_publish_" + release_id, promote=False)
+                atomic_json(pointer, {"release_id": release_id, "path": row["path"], "published_at": utcnow()})
+                from .coordinated_update import publication_context
+                transition = publication_context(cfg, release_id)
+                if transition is not None:
+                    transition.before_commit()
+                if bound_manifest is not None:
+                    os.environ[MANIFEST_ENV] = str(bound_manifest)
+                    from .lean_recovery import recovery_assets
+                    recovery_assets(cfg)
+                if transition is not None:
+                    transition.assert_locks()
+        except Exception:
+            if previous_manifest is None:
+                os.environ.pop(MANIFEST_ENV, None)
+            else:
+                os.environ[MANIFEST_ENV] = previous_manifest
+            if previous is not None:
+                atomic_json(pointer, previous)
+            else:
+                pointer.unlink(missing_ok=True)
+            raise
     failure = Path(cfg["state_dir"]) / "last_failure.json"
     failure.unlink(missing_ok=True)
     tracking_manifest = json.loads((Path(tracking_after) / 'manifest.json').read_text())
@@ -398,8 +417,13 @@ def recover_pointer(db, cfg):
         value = json.loads(pointer.read_text()) if pointer.exists() else None
     except (OSError, ValueError):
         value = None
-    if release and (not value or value.get("release_id") != release["release_id"]):
-        atomic_json(pointer, {"release_id": release["release_id"], "path": release["path"], "recovered_at": utcnow()})
+    if release:
+        # store.current already applies the existing release_locations mapping.
+        path = release['path']
+        if not isinstance(path, str) or not path:
+            raise PipelineError('Invalid release location path')
+        if not value or value.get("release_id") != release["release_id"] or value.get('path') != path:
+            atomic_json(pointer, {"release_id": release["release_id"], "path": path, "recovered_at": utcnow()})
     elif not release and pointer.exists():
         pointer.unlink()
 

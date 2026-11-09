@@ -725,7 +725,7 @@ def test_dashboard_tracking_search_and_history_are_read_only(project,monkeypatch
     monkeypatch.setenv('STUDY2_CONFIG',str(config))
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'dashboard.py')).run(timeout=60)
     assert not app.exception
-    assert any(t.label=='親子追蹤' for t in app.tabs)
+    assert any(t.label=='Family tracking' for t in app.tabs)
     app.text_input(key='dyad_search').set_value(rows[0]['dyad_id']).run(timeout=60)
     assert not app.exception
     app.selectbox(key='dyad_history').set_value(rows[0]['dyad_id']).run(timeout=60)

@@ -260,13 +260,21 @@ class _LegacyPublication:
         return result
 
 
-def load_eligibility(folder, summary, analysis, parents, *, manifest_path=None):
+def load_eligibility(folder, summary, analysis, parents, *, manifest_path=None, cfg=None):
     """Only an explicit optional path enables reads of the private inputs."""
     release=summary['release_id']
     path=manifest_path if manifest_path is not None else os.environ.get(ENVIRONMENT_KEY)
     if not path:
         return EligibilityState(release)
     try:
+        from .flag_binding import CONTROL_ENV, POLICY_ENV, resolve_current
+        bound = None
+        if os.environ.get(CONTROL_ENV) or os.environ.get(POLICY_ENV):
+            if cfg is None:
+                raise EligibilityError('managed_flag_config_required')
+            bound = resolve_current(cfg)
+            if bound is None or Path(path).resolve() != bound.resolve():
+                raise EligibilityError('managed_exclusion_manifest_mismatch')
         manifest=json.loads(Path(path).read_bytes())
         if summary.get('descriptive',{}).get('version')!=VERSION:
             raise EligibilityError('descriptive_evidence_unavailable')
@@ -289,7 +297,10 @@ def load_eligibility(folder, summary, analysis, parents, *, manifest_path=None):
             panel=({name:publication.frame('independent_parent_'+name+'.parquet') for name in
                     ('analysis','pairs','audit','candidates','sensitivity')} if publication is not None else read_panel(folder))
             verify_panel(panel,summary['independent_parent'])
-        return prepare_eligibility(records,analysis,parents,measurements,summary,manifest,panel=panel)
+        result = prepare_eligibility(records,analysis,parents,measurements,summary,manifest,panel=panel)
+        if bound is not None and resolve_current(cfg) != bound:
+            raise EligibilityError('managed_exclusion_binding_changed')
+        return result
     except EligibilityError as error:
         code=str(error)
         return EligibilityState(release,reason=code if re.fullmatch(r'[a-z][a-z0-9_]{0,100}',code) else 'manual_exclusion_inputs_invalid')

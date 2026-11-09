@@ -3,10 +3,12 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import shutil
 import sqlite3
 import tempfile
 import zlib
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .common import PipelineError, dumps, file_hash, secure_directory, utcnow
@@ -92,18 +94,13 @@ def connect(state: Path, readonly: bool = False) -> sqlite3.Connection:
 @contextmanager
 def writer_lock(state: Path):
     from .maintenance import recover_activation
-    recover_activation(state)
-    import fcntl
     secure_directory(state)
-    with (state / "writer.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise PipelineError("Another pipeline/review operation is running") from None
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    from .owned_locks import exclusive
+    with exclusive(state / 'writer.lock'):
+        from .coordinated_update import require_available
+        require_available(state)
+        recover_activation(state)
+        yield
 
 
 def current(db: sqlite3.Connection) -> dict | None:
@@ -177,6 +174,81 @@ def backup_path(path: Path, expected_hash: str | None = None):
         if expected_hash and h.hexdigest() != expected_hash:
             raise PipelineError('Release backup checksum mismatch')
         yield restored
+
+
+_release_verification = ContextVar('study2_release_verification', default=None)
+
+
+@contextmanager
+def release_verification_cache():
+    """Reuse successful backup checks within one operation, never file metadata.
+
+    Nested calls share the operation; the outermost exit discards all results,
+    including on exceptions. Every caller must still authenticate current bytes.
+    """
+    if _release_verification.get() is not None:
+        yield
+        return
+    token = _release_verification.set({'logical': set(), 'compressed': set()})
+    try:
+        yield
+    finally:
+        _release_verification.reset(token)
+
+
+def _check_backup_integrity(path):
+    # This is a private main-file snapshot, not a live WAL database.
+    snapshot = sqlite3.connect(path.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
+    try:
+        if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise PipelineError("Release backup failed integrity check")
+    finally:
+        snapshot.close()
+
+
+def verify_backup_integrity(path: Path, expected_hash: str):
+    """Authenticate current backup bytes and reuse only successful integrity checks.
+
+    A gzip hash authenticates a previously checked encoding and logical checksum.
+    Plain and newly encountered gzip encodings share integrity results only after
+    their logical bytes have been authenticated. Owner-writable paths and mtimes
+    never establish identity; no temporary snapshot survives this call.
+    """
+    path = Path(path)
+    source = path
+    if path.suffix != '.gz' and not path.is_file():
+        source = path.with_name(path.name + '.gz')
+    compressed = source.suffix == '.gz'
+    if not source.is_file():
+        raise PipelineError('Full recovery backup is unavailable; it may have been removed by retention')
+    physical_hash = file_hash(source)
+    cache = _release_verification.get()
+    encoded_key = (physical_hash, expected_hash)
+    if not compressed:
+        if expected_hash and physical_hash != expected_hash:
+            raise PipelineError('Release backup checksum mismatch')
+        if cache is not None and physical_hash in cache['logical']:
+            return
+    elif cache is not None and encoded_key in cache['compressed']:
+        return
+
+    # Check the exact authenticated bytes, not an owner-writable original path
+    # that SQLite could reopen after hashing. Copying is needed only on misses.
+    with tempfile.TemporaryDirectory(prefix='study2-verify-backup-') as folder:
+        frozen = Path(folder) / ('backup.sqlite.gz' if compressed else 'backup.sqlite')
+        with source.open('rb') as origin, frozen.open('xb') as target:
+            frozen.chmod(0o600)
+            shutil.copyfileobj(origin, target)
+        if file_hash(frozen) != physical_hash:
+            raise PipelineError('Release backup changed during verification')
+        with backup_path(frozen, expected_hash) as restored:
+            logical_hash = file_hash(restored)
+            if cache is None or logical_hash not in cache['logical']:
+                _check_backup_integrity(restored)
+        if cache is not None:
+            cache['logical'].add(logical_hash)
+            if compressed:
+                cache['compressed'].add(encoded_key)
 
 
 def backup(db, path: Path) -> None:

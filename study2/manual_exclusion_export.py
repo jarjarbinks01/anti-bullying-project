@@ -3,7 +3,7 @@ from copy import deepcopy
 import math
 import re
 
-from .analysis_eligibility import (EligibilityError, POLICY, HASH_SCHEME, inventory_revision,
+from .presentation.analysis_eligibility import (EligibilityError, POLICY, HASH_SCHEME, inventory_revision,
     project_eligibility, projected_cohorts, scope_overlay, sha, _need, _hash)
 from .common import digest, plain
 

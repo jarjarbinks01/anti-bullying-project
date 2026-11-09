@@ -13,7 +13,7 @@ dependencies = ["pandas>=2.2,<3", "numpy>=1.26,<3", "scipy>=1.12,<2", "openpyxl>
 test = ["pytest>=8,<10"]
 
 [project.scripts]
-study2 = "study2.cli:main"
+study2 = "study2.entrypoint:main"
 
 [tool.setuptools.packages.find]
 include = ["study2*"]
@@ -21,6 +21,7 @@ namespaces = false
 
 [tool.setuptools.package-data]
 study2 = ["assets/review_template.xlsx"]
+"study2.presentation" = ["assets/*.js", "assets/*.css", "assets/*.mjs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

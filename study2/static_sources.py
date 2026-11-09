@@ -8,8 +8,8 @@ import math
 import pandas as pd
 
 from .common import PipelineError, plain
-from .descriptive_spec import VERSION, DICTIONARY_VERSION, variables
-from .descriptives import adult_continuity_confirmed, group_rows, values_and_status
+from .presentation.descriptive_spec import VERSION, DICTIONARY_VERSION, variables
+from .presentation.descriptives import adult_continuity_confirmed, group_rows, values_and_status
 from .descriptive_exploration import _validate_pairs
 from .static_grade import PAIR, check_moments, moments, table, validate_cube
 

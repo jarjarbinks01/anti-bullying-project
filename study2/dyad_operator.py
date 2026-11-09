@@ -1,12 +1,14 @@
 """Controlled local operator actions. Never sends invitations or survey data."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import uuid
 from datetime import timedelta
+from itertools import zip_longest
 from pathlib import Path
 
 from . import dyads
@@ -113,6 +115,113 @@ def workspace_snapshot(db):
             for t in TABLES} if dyads.exists(db) else {}
 
 
+def _tracking_tables_json(tables, rows):
+    """Preserve the existing canonical table keys and supplied row order."""
+    yield '{'
+    for index, table in enumerate(sorted(tables)):
+        if index:
+            yield ', '
+        yield dumps(table) + ': ['
+        for position, row in enumerate(rows(table)):
+            if position:
+                yield ', '
+            yield dumps(row)
+        yield ']'
+    yield '}'
+
+
+def _tracking_json(db):
+    """Yield exactly dumps(workspace_snapshot(db)), without retaining its rows."""
+    tables = TABLES if dyads.exists(db) else ()
+    yield from _tracking_tables_json(tables,
+        lambda table: (dict(row) for row in db.execute(f'SELECT * FROM {table} ORDER BY 1')))
+
+
+def _tracking_digest(parts):
+    value = hashlib.sha256()
+    for part in parts:
+        value.update(part.encode('utf-8'))
+    return value.hexdigest()
+
+
+def workspace_revision(db):
+    """Hash the existing tracking format within the caller's SQLite snapshot."""
+    return _tracking_digest(_tracking_json(db))
+
+
+def _saved_tracking_revision(data):
+    # Preserve exact authentication for malformed legacy shapes too.
+    if not isinstance(data, dict) or any(not isinstance(rows, list) for rows in data.values()):
+        return digest(data)
+    # Authenticate all actual keys, including unexpected ones, before schema checks.
+    return _tracking_digest(_tracking_tables_json(data, data.__getitem__))
+
+
+def _write_tracking(db, path):
+    """Stream a compatible administrative backup; return its tracking revision."""
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    value = hashlib.sha256()
+    try:
+        with temporary.open('w', encoding='utf-8') as stream:
+            temporary.chmod(0o600)
+            stream.write('{"schema_version": ' + dumps(dyads.SCHEMA_VERSION) + ', "tables": ')
+            for part in _tracking_json(db):
+                stream.write(part)
+                value.update(part.encode('utf-8'))
+            stream.write('}')
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return value.hexdigest()
+
+
+def check_publication_tracking(before, after, release_id):
+    """Compare pinned pre-write rows with the publisher's uncommitted rows.
+
+    The before reader must close before the writer commits in DELETE mode.
+    Event IDs are content-derived, not a monotonically increasing watermark.
+    """
+    def need(ok, message):
+        if not ok:
+            raise PipelineError(message)
+
+    present = dyads.exists(before)
+    need(present == dyads.exists(after), 'tracking_schema_changed')
+    if not present:
+        return
+    for table in TABLES:
+        old = iter(before.execute(f'SELECT * FROM {table} ORDER BY 1'))
+        current = iter(after.execute(f'SELECT * FROM {table} ORDER BY 1'))
+        if table == 'dyad_events':
+            prior = next(old, None)
+            for row in current:
+                row = dict(row)
+                if prior is not None and row['event_id'] == prior['event_id']:
+                    need(dumps(row) == dumps(dict(prior)), 'tracking_history_removed')
+                    prior = next(old, None)
+                else:
+                    need(prior is None or row['event_id'] < prior['event_id'], 'tracking_history_removed')
+                    need(row['kind'] == 'published_mapping' and
+                         json.loads(row['payload_json']).get('run_id') == release_id,
+                         'unrelated_tracking_history_changed')
+            need(prior is None, 'tracking_history_removed')
+            continue
+        for row, new in zip_longest(old, current):
+            if table == 'dyad_registry':
+                need(row is not None and new is not None and row['dyad_id'] == new['dyad_id'],
+                     'issued_id_set_changed')
+                row, new = dict(row), dict(new)
+                need(all(new[k] == v for k, v in row.items()
+                         if k not in {'lifecycle', 'first_published_run_id'}), 'issued_id_anchor_changed')
+                need(row['first_published_run_id'] is None or
+                     new['first_published_run_id'] == row['first_published_run_id'],
+                     'issued_id_first_publication_changed')
+                need(row['lifecycle'] != 'retired' or new['lifecycle'] == 'retired', 'retired_id_reactivated')
+            else:
+                need(row is not None and new is not None and dict(row) == dict(new),
+                     'unrelated_tracking_table_changed')
+
+
 def backup_tracking(db, cfg, reason='manual', promote=True):
     """Small complete administrative snapshot plus independently saved reviews.
 
@@ -122,8 +231,7 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
     """
     from .review_core import backup_workspace
     from .lean_recovery import enabled
-    data = workspace_snapshot(db)
-    tracking_hash = digest(data)
+    tracking_hash = workspace_revision(db)
     review = backup_workspace(cfg, 'dyad_' + reason)
     review_hash = file_hash(Path(review)) if review else None
     pointer = Path(cfg['state_dir']) / 'DYAD_LEDGER.json'
@@ -131,7 +239,8 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
         prior = json.loads(pointer.read_text())
         # Verify the old immutable bundle before reuse; a corrupt recovery copy
         # must never be silently accepted merely because its index matches.
-        saved, _ = verify_bundle(prior['bundle'])
+        saved, saved_data = verify_bundle(prior['bundle'])
+        del saved_data
         if prior['hash'] != saved['tracking_hash']:
             raise PipelineError('Administrative recovery index mismatch')
         if saved['tracking_hash'] == tracking_hash and saved['files'].get('review.sqlite') == review_hash:
@@ -139,7 +248,8 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
     folder = Path(cfg['state_dir']) / 'dyad_backups' / ('bundle_' + uuid.uuid4().hex)
     secure_directory(folder)
     ledger = folder / 'tracking.json'
-    atomic_json(ledger, {'schema_version': dyads.SCHEMA_VERSION, 'tables': data})
+    if _write_tracking(db, ledger) != tracking_hash:
+        raise PipelineError('Administrative tracking changed during backup')
     ledger.chmod(0o600)
     if review:
         # Both paths are immutable snapshots. Share their storage without
@@ -177,7 +287,7 @@ def verify_bundle(folder):
         try:
             with gzip.open(folder/'tracking.json.gz','rt',encoding='utf-8') as stream:data=json.load(stream)['tables']
         except (OSError,EOFError,ValueError) as error:raise PipelineError('Administrative checkpoint content is corrupt') from error
-    if digest(data) != manifest['tracking_hash'] or set(data) not in (set(), set(TABLES)):
+    if _saved_tracking_revision(data) != manifest['tracking_hash'] or set(data) not in (set(), set(TABLES)):
         raise PipelineError('登記備份內容不完整')
     if (folder / 'review.sqlite').exists():
         db = sqlite3.connect(f"file:{folder / 'review.sqlite'}?mode=ro", uri=True)

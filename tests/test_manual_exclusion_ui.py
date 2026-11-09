@@ -24,6 +24,10 @@ NODE_MODULES=Path(os.environ.get('SOURCE_UI_NODE_MODULES',Path.home()/'.cache/co
 
 @pytest.fixture(scope='module')
 def ui_data():
+    missing = [key for key in ('MANUAL_UI_HASH_JS', 'MANUAL_UI_EVIDENCE_DIR')
+               if not os.environ.get(key)]
+    if missing:
+        pytest.skip('Optional synthetic manual-exclusion UI fixtures require: ' + ', '.join(missing))
     cache=os.environ.get('MANUAL_UI_INPUT_BUNDLE')
     if cache:
         with gzip.open(cache,'rt',encoding='utf-8') as stream:stored=json.load(stream)
@@ -139,6 +143,10 @@ console.log(JSON.stringify({status:'passed',checks:4,servers_started:0}));
 
 def test_actual_core_generated_site_bundle_and_raw_pair_oracle():
     """Use the copied, hash-verified core site rather than a synthetic scope stub."""
+    missing = [key for key in ('MANUAL_UI_CORE_FIXTURE_DIR', 'MANUAL_UI_EVIDENCE_DIR')
+               if not os.environ.get(key)]
+    if missing:
+        pytest.skip('Optional synthetic core_r2 UI fixture requires: ' + ', '.join(missing))
     root=Path(os.environ['MANUAL_UI_CORE_FIXTURE_DIR'])
     data=json.loads((root/'SYNTHETIC_FIXTURE.json').read_text())
     oracle=json.loads((root/'SYNTHETIC_INPUT_ORACLE.json').read_text())

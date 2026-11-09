@@ -20,6 +20,8 @@ from study2.streamlit_eligibility import (ActiveEligibilityUnavailable,Eligibili
 
 
 def inputs():
+    if not os.environ.get('MANUAL_UI_CORE_FIXTURE_DIR'):
+        pytest.skip('Optional synthetic core_r2 Streamlit fixture requires MANUAL_UI_CORE_FIXTURE_DIR')
     root=Path(os.environ['MANUAL_UI_CORE_FIXTURE_DIR'])
     data=json.loads((root/'SYNTHETIC_INPUT_ORACLE.json').read_text())
     public=json.loads((root/'SYNTHETIC_FIXTURE.json').read_text())

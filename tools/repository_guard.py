@@ -14,11 +14,10 @@ from pathlib import PurePosixPath
 
 
 EXACT_PATHS = {
-    '.gitignore', '.gitattributes', 'README.md', 'pyproject.toml',
-    'requirements.lock.txt', 'dashboard.py', 'config.example.json',
+    '.gitignore', '.gitattributes', 'README.md', 'AGENTS.md', 'pyproject.toml',
+    'requirements.lock.txt', 'dashboard.py', 'local_update_entry.py', 'config.example.json',
     'Prepare Batch.command', 'Run Pipeline.command', 'Start Dashboard.command',
-    'Export Review.command', 'Review Centre.command', 'Dyad Centre.command',
-    'Export Static Dashboard.command',
+    'Export Review.command', 'Review Centre.command', 'Dyad Centre.command', 'Export Static Dashboard.command',
     '.githooks/pre-commit', '.githooks/pre-push',
     'tools/repository_guard.py', 'tools/qa/synthetic_review.py',
     'tools/qa/review_workbook.mjs',
@@ -26,13 +25,14 @@ EXACT_PATHS = {
     'docs/REVIEW_CARDS_OPERATIONS.md', 'docs/MATCHING_RULES.md',
     'docs/REPOSITORY.md', 'docs/DYAD_TRACKING_OPERATIONS.md', 'docs/CODE_READING_GUIDE.md',
     'docs/INDEPENDENT_PARENT_ANALYSIS.md',
-    'docs/DESCRIPTIVE_ANALYSIS.md',
-    'docs/STATIC_RESEARCHER_DASHBOARD.md',
-    'tests/static_source_ui_browser.cjs',
-    'tests/paired_table_ui_browser.cjs',
-    'tests/manual_exclusion_ui_browser.cjs',
+    'docs/DESCRIPTIVE_ANALYSIS.md', 'docs/STATIC_RESEARCHER_DASHBOARD.md',
+    'tests/static_source_ui_browser.cjs', 'tests/paired_table_ui_browser.cjs',
+    'tests/manual_exclusion_ui_browser.cjs', 'docs/PORTABLE_WORKFLOW.md', 'docs/PROJECT_STATE.md', 'docs/DECISIONS.md', 'docs/portable-update-helpers.md', 'docs/presentation-boundary.md',
+    'study2/presentation/assets/app.js', 'study2/presentation/assets/app.css',
+    'study2/presentation/assets/quality.js', 'study2/presentation/assets/scope.js',
+    'study2/presentation/assets/local-preview.mjs',
 }
-PYTHON_DIRECTORIES = {'study2', 'tests', 'mappings'}
+PYTHON_DIRECTORIES = {'study2', 'study2/presentation', 'tests', 'mappings'}
 TEMPLATE_PATH = 'study2/assets/review_template.xlsx'
 TEMPLATE_SHA256 = 'edfbf5f5397e351c8894054c90030b47c31ab52f19c1dfce2957eea024d49189'
 MAX_BLOB_BYTES = 2_000_000
