@@ -17,11 +17,12 @@ from study2.presentation import analysis_eligibility as presentation_eligibility
 from study2.presentation import descriptives as presentation
 
 
-def test_accepted_client_bytes_preserved():
-    # Hashes verified against the accepted formal export before consolidation.
+def test_reviewed_client_bytes_preserved():
+    # HTML/CSS retain the accepted pre-consolidation export. APP_JS also includes
+    # the reviewed Back/Forward fix, covered by the navigation browser tests.
     expected = {
         'HTML': '1b0fa232560909db86a615134681507ccfbaca6cc7458fe9ffbaf928dedd30fa',
-        'APP_JS': '673ae59091c1a2df14252d416b2aa31bcd612e576aed867a59e9f7f7349f3980',
+        'APP_JS': 'f0e63b82cf51adecb52ea6a05e7d7cde3b646049fb543332c544ad4407f3791f',
         'STYLES': 'ccb63b546f534f2d83cddee52970296080c284e0271d4f94940a0bf3c1bc8264',
     }
     for name, digest in expected.items():
