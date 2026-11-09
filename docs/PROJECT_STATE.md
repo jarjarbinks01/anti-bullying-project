@@ -14,33 +14,41 @@ The [decision log](DECISIONS.md) explains consequential choices. Current method 
 
 ## Current milestone
 
-**Portable source consolidation, robustness fixes and the different-release writer transition are implemented and adopted locally. Remote publication remains separate.**
+**Portable source consolidation, robustness fixes, the different-release writer transition and the publication-performance update are implemented and adopted locally. Remote publication remains separate.**
 
-- Branch: `refactor/portable-study2-20261108`, based on public `main` at `9bd6357f49bc0cb37f0e9d7d3f8eb6c7fa65f66f`. Newer main features were retained rather than replaced by the older local source tree.
-- Native update/review helpers and the presentation boundary now share one maintained checkout. Module, installed console and isolated recovery bridge enter the same public route. Readable final client assets are authoritative; eligibility calculations have one implementation.
+- Current branch: `perf/publication-verification-20261109`, following the portable consolidation and writer-transition commits. Public `main` remains at `9bd6357f49bc0cb37f0e9d7d3f8eb6c7fa65f66f`. Newer main features were retained rather than replaced by the older local source tree.
+- Native update/review helpers and the presentation boundary share one maintained source. Module, installed console and isolated recovery bridge enter the same public route. Readable final client assets are authoritative; eligibility calculations have one implementation.
 - Private paths and hash-pinned historical trust bindings are configured outside Git. Historical same-adult results retain their meaning; explicitly configured native same-child BD and labelled dashboard projection remain distinct. Paired parent PHQ still requires confirmed adult continuity.
 - The normal export CLI defaults to exclusions ON. Review application also preserves its approved/waiting response when the newer owned lock reports actual contention.
 - The follow-up fixes remove fully excluded original intent scopes from active workload, resolve original acceptance through authenticated undo restoration links, route child diagnostics to stderr, reject unsupported checkpoint journal modes before reuse, and restore browser Back/Forward rendering. Decision history and scientific definitions are unchanged.
-- A genuine new-data release was published locally, its completed journal retired, and the full formal dashboard rendered. The installed package, launchers and default binding now use the frozen consolidated source. Protected startup passed current-context validation and all 67 asset hashes.
-- The existing 15-minute queued-batch scheduler was restored; its first actual invocation exited successfully with no ready batches. Browser visual QA awaits user login and is not claimed as passed. No source push, private-repository publication or Vercel deployment is included in this local adoption.
+- A genuine new-data release was published locally, its completed journal retired, and the full formal dashboard rendered. The installed package, launchers and default binding were switched to the frozen consolidated source. Protected startup passed current-context validation and all 67 asset hashes; the later performance-source adoption is recorded below.
+- The existing 15-minute queued-batch scheduler was restored; its first actual invocation exited successfully with no ready batches. Focused authenticated browser visual QA of the current formal local release is complete; its scope and limitations are recorded below. No source push, private-repository publication or Vercel deployment is included in this local adoption.
 
-## Isolated publication-performance follow-up
+## Publication-performance update
 
-Implemented on `perf/publication-verification-20261109`, separately from the adopted runtime. Tracking revisions, backup output and publication comparisons stream the existing canonical rows instead of retaining multiple complete histories. Successful backup integrity results are reused only within one operation after authenticating current content. Both retirement verification boundaries and all mutable-state checks remain.
+Implemented as `82da27e` on `perf/publication-verification-20261109` and adopted through the ordinary source-only runtime route. Tracking revisions, backup output and publication comparisons stream the existing canonical rows instead of retaining multiple complete histories. Successful backup integrity results are reused only within one operation after authenticating current content. Both retirement verification boundaries and all mutable-state checks remain.
 
 - Frozen-source selection: 174 focused synthetic cases passed, with the explicitly opt-in memory benchmark skipped in that selection and passed separately. Coverage includes canonical digest parity, malformed/changed history refusal, cache invalidation, real interrupted publication/retirement, changed-input recovery and historical-to-current writer transition. After retaining the final dynamic tracking recheck, 80 focused recovery/retirement cases passed and a new concurrent-WAL-publication refusal regression passed separately. The compressed-backup restore recheck also passed; the other three compressed cases passed in earlier focused checks.
 - Native synthetic instrumentation reduced full release-backup integrity scans from nine to two per publication and eight to two per retirement. This measures scan count, not an end-to-end live speedup.
 - A separate 500,000-event digest/comparison benchmark used 17,489 bytes peak traced Python allocation and 96.75 seconds with tracing enabled. It excludes existing saved-JSON parsing, recovery dictionaries, SQLite-native buffers and whole-process RSS. The earlier equivalent streaming benchmark also passed.
 - Independent review caught and resolved malformed non-list backup tables hashing as empty arrays. Their original authentication semantics are now preserved and tested. Review found no remaining blocker. Initial source-change refusals, source-tree read stalls and interrupted checks are not counted as passing; final checks used a frozen temporary source copy.
-- No live source, runtime configuration, scheduler, research state or deployment was changed. A local source commit is not activation. New applicable source/runtime bindings are still required before adopting this optimization.
+- Local adoption used an exact committed source archive as the deployed artifact, with the Git worktree remaining the maintained source. Normal offline editable installation preserved dependency versions. Package, launchers, default configuration and selector now agree, while previous source/bindings and all previously required recovery assets remain available. The candidate recovery inventory covers its actual runtime dependencies.
+- The current scoped write authority, review rules and policy implementation remained unchanged. Fresh operational source/preview bindings did not alter accepted scientific evidence or historical compatibility pins. One actual protected startup passed current controls, existing manifest and all asset hashes. The established scheduler was restored after startup. No scientific rerun, new release, render, source push or remote deployment was needed.
+- A pre-existing failed-checkpoint warning was preserved unchanged; this operation did not retry or complete that checkpoint. A preliminary activation-help probe exceeded its read-only timeout and was not counted as passed or retried. The actual protected startup supplied the necessary qualification instead. Exact outcomes and the rollback packet remain in the private operational record.
 
 ## Remaining work
 
-1. Complete authenticated browser visual QA after user login. Track source review/publication, private repository publication and Vercel verification separately from the completed local adoption. Reuse valid artifacts; do not rematch for a presentation-only change.
+1. Track source review/publication, private repository publication and Vercel verification separately from the completed local adoption and focused authenticated browser QA. Reuse valid artifacts; do not rematch for a presentation-only change.
 2. Before future changes or activation, review actual private bindings and current native evidence. Source changes invalidate prepared proposals and source-pinned certificates where those identities apply; source verification does not authorize their reuse or manufacture replacement authority.
 3. Keep historical recovery assets and release evidence until a separately authorized transition proves the required recovery path. A portable source tree does not free assets named by existing recovery inventories. Launcher, interpreter/package binding, working directory, selector and configuration must agree at transition.
 
 ## Verification and limits
+
+### Focused authenticated local browser QA
+
+- Authenticated Chrome checks covered the current formal local release, exclusion toggling, stable review-control summaries, parent PHQ responding-adult labelling and score axis, and semester and sex filters. The original analysis selections and data-quality view were restored, with all sources and versions selected, no date bounds and exclusions ON.
+- Same-child pairing retained the same-adult continuity requirement for paired parent PHQ; paired PHQ was not offered without that evidence. School-review evidence remained visibly unavailable or unreconciled, not zero or passed.
+- The initial paired-view load encountered two browser timeouts before recovering. This was focused UI QA, not a broader browser suite or download verification, and does not establish remote publication or deployment. Exact release evidence remains in the private operational record.
 
 ### Historical transition preparation, before local adoption
 
@@ -78,7 +86,7 @@ The isolated historical-read candidate is now integrated with a narrow different
 - Retaining the historical profile after transition does not block current readers: the exact current workload selects the historical lane, otherwise readers validate strictly.
 - Recovery repairs a stale derived path even when its release ID is already correct, using the existing relocation-aware native lookup. Invalid effective paths fail before writing.
 - Independent source review found no remaining blocker. Focused synthetic verification and exact limits are recorded below. Source completion does not establish operational admission, scientific-run completion, local activation, snapshot export, publication or deployment; the private guide owns those outcomes.
-- Same-scientific-release writer migration remains unsupported. A genuinely new release supplies the distinct TARGET required by the existing coordinated plan and recovery contract.
+- Same-scientific-release writer migration remains unsupported. A genuinely new release supplies the distinct TARGET required by the existing coordinated plan and recovery contract. A source-only operational update that preserves the actual scoped authority is a separate route; see [source-only runtime updates](PORTABLE_WORKFLOW.md#source-only-runtime-updates).
 
 ### Transition verification
 

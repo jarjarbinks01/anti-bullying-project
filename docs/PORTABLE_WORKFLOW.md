@@ -170,6 +170,27 @@ release evidence until the intended recovery path has been demonstrated. A real
 transition must coordinate the launcher, interpreter/package binding, working
 directory, dispatcher/selector and configuration, not only an entrypoint pointer.
 
+### Source-only runtime updates
+
+A performance-only source update need not create a new scientific release when
+its actual scoped write authority, review rules and policy implementation remain
+valid. Check those bindings against the installed candidate; unchanged release
+IDs alone do not establish compatibility. Keep original scientific provenance
+and historical source/profile evidence. Never rewrite an accepted certificate or
+use the different-release publication/recovery route for a source-only switch.
+
+Use the existing ordinary installation route with a versioned private
+configuration and selector. Coordinate the editable package, launchers, working
+directory and default configuration while consumers are quiesced and no
+publication/recovery transition is pending; preserve the previous bindings for
+rollback. An exact committed source archive may be the deployed artifact when the maintained checkout is unsuitable for reliable local
+reads. It is not a second maintained implementation. Preserve historical recovery
+assets and verify that the candidate configuration's recovery inventory covers
+its actual runtime bindings. Retain security settings, qualify the actual
+protected startup against the existing site's context and assets, and restore
+the established scheduler last. A source-only update does not require export
+when that site remains valid.
+
 ## Focused verification
 
 The relevant consolidation checks cover entry-point parity, exact historical
