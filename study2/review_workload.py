@@ -70,7 +70,7 @@ def validate_summary(value, *, release_id, decision_revision, exclusion_revision
     return native_rows
 
 
-def load_summary(*, release_id, decision_revision, exclusion_revision=None, path=None, review_state=None,cfg=None,inventory=None):
+def load_summary(*, release_id, decision_revision, exclusion_revision=None, path=None, review_state=None,cfg=None,inventory=None,historical_read=False):
     state_value = review_state if review_state is not None else os.environ.get('STUDY2_REVIEW_STATE_DIR')
     if state_value is not None:
         from .coordinated_update import require_available
@@ -80,13 +80,20 @@ def load_summary(*, release_id, decision_revision, exclusion_revision=None, path
     if not supplied:
         raise WorkloadUnavailable('summary_not_supplied')
     try:
-        value = json.loads(Path(supplied).read_text(encoding='utf-8'))
+        raw = Path(supplied).read_bytes()
+        value = json.loads(raw)
+        if historical_read:
+            from .compatibility_profiles import administrative_read_contract
+            import hashlib
+            trust = administrative_read_contract()
+            if trust is None or hashlib.sha256(raw).hexdigest() != trust['workload_pin']['sha256']:
+                raise ValueError('historical_workload_changed')
     except (OSError, ValueError, UnicodeError, RecursionError):
         raise WorkloadUnavailable('summary_unreadable') from None
     try:
         rows = validate_summary(value, release_id=release_id,
             decision_revision=decision_revision, exclusion_revision=exclusion_revision)
-        rows = _verify_admin_projection(value, rows, release_id, decision_revision, review_state=review_state,cfg=cfg,inventory=inventory)
+        rows = _verify_admin_projection(value, rows, release_id, decision_revision, review_state=review_state,cfg=cfg,inventory=inventory,historical_read=historical_read)
     except (RecursionError, KeyError, TypeError, ValueError):
         raise WorkloadUnavailable('summary_invalid') from None
     return value, rows
@@ -136,7 +143,7 @@ def render_current_review_workload(st, *, release_id, decision_revision, exclusi
     return True
 
 
-def _verify_admin_projection(value, rows, release_id, decision_revision, *, review_state=None,cfg=None,inventory=None):
+def _verify_admin_projection(value, rows, release_id, decision_revision, *, review_state=None,cfg=None,inventory=None,historical_read=False):
     import sqlite3
     block = value.get('administrative_disposition')
     if block is None:
@@ -154,7 +161,7 @@ def _verify_admin_projection(value, rows, release_id, decision_revision, *, revi
                 from .administrative_carry_current import validate_workload
                 if not isinstance(cfg,dict) or Path(cfg['state_dir']).resolve()!=state.resolve():
                     raise WorkloadUnavailable('current_carry_configuration_required')
-                actual=validate_workload(cfg,work,block,inventory=inventory)
+                actual=validate_workload(cfg,work,block,inventory=inventory,historical_read=historical_read)
             else:actual = project_closures(work, bindings, block['case_inventory'])
             if (not actual['projection_ready'] or actual != block['projection'] or
                     administrative_revision(work) != block['admin_revision']):

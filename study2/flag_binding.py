@@ -328,7 +328,7 @@ def _current_inventory(cfg):
     return inventory
 
 
-def _require_current_workload(cfg, inventory, manifest, *, staged_pointer=None):
+def _require_current_workload(cfg, inventory, manifest, *, staged_pointer=None, historical_read=False):
     """Fail closed while selection and disposition references differ.
 
     These files are independently atomic; the activation procedure must install
@@ -337,6 +337,9 @@ def _require_current_workload(cfg, inventory, manifest, *, staged_pointer=None):
     may accept a generation.
     """
     from .review_workload import load_summary
+    _need(not historical_read or staged_pointer is None or
+          staged_pointer == _json(Path(cfg['state_dir']) / 'CURRENT_REVIEW_DISPOSITION.json'),
+          'historical_read_not_publication')
     try:
         state = Path(cfg['state_dir']).resolve()
         pointer_path = state / 'CURRENT_REVIEW_DISPOSITION.json'
@@ -362,7 +365,7 @@ def _require_current_workload(cfg, inventory, manifest, *, staged_pointer=None):
                 'SELECT decision_id,payload_json,supersedes FROM decisions ORDER BY decision_id')])
         combined = _json(manifest)
         workload, _ = load_summary(release_id=inventory.release_id, decision_revision=revision,
-                                   exclusion_revision=combined['revision'], path=workload_path, review_state=state,cfg=cfg,inventory=inventory)
+                                   exclusion_revision=combined['revision'], path=workload_path, review_state=state,cfg=cfg,inventory=inventory,historical_read=historical_read)
         administrative = workload.get('administrative_disposition')
         if administrative is not None:
             _need(pointer.get('admin_revision') == administrative.get('admin_revision')
@@ -388,7 +391,21 @@ def _require_current_workload(cfg, inventory, manifest, *, staged_pointer=None):
         raise PipelineError('review_disposition_binding_unavailable') from None
 
 
-def resolve_current(cfg):
+def historical_current(cfg):
+    """Select exact historical OLD admission, never authority for TARGET writes.
+
+    A retained read profile must not prevent strict readers on the new release.
+    The full validator still authenticates bytes, evidence, history and controls.
+    """
+    from .compatibility_profiles import administrative_read_contract
+    trust = administrative_read_contract()
+    if trust is None:
+        return False
+    pointer = Path(cfg['state_dir']) / 'CURRENT_REVIEW_DISPOSITION.json'
+    return _json(pointer).get('workload_sha256') == trust['workload_pin']['sha256']
+
+
+def resolve_current(cfg, *, historical_read=False):
     """Resolve the manifest for the authoritative SQLite publication, read-only."""
     from .coordinated_update import require_available
     require_available(Path(cfg['state_dir']))
@@ -399,12 +416,12 @@ def resolve_current(cfg):
     inventory = _current_inventory(cfg)
     with _locked_registry(registry) as (metadata, state):
         manifest = _validate(cfg, root / 'control.json', policy_pointer, descriptor, inventory, metadata, state)
-        _require_current_workload(cfg, inventory, manifest)
+        _require_current_workload(cfg, inventory, manifest, historical_read=historical_read)
         return manifest
 
 
 @contextmanager
-def guarded_current(cfg):
+def guarded_current(cfg, *, historical_read=False):
     """Pin the publication and both flag layers while an export is produced."""
     from .coordinated_update import require_available
     require_available(Path(cfg['state_dir']))
@@ -423,15 +440,19 @@ def guarded_current(cfg):
             inventory = _current_inventory(cfg)
             with _locked_registry(registry) as (metadata, state):
                 manifest = _validate(cfg, root / 'control.json', policy_pointer, descriptor, inventory, metadata, state)
-                _require_current_workload(cfg, inventory, manifest)
+                _require_current_workload(cfg, inventory, manifest, historical_read=historical_read)
                 yield manifest
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def guarded_consumer(function):
+def guarded_consumer(function=None, *, historical_read=False):
+    if function is None:
+        return lambda fn: guarded_consumer(fn, historical_read=historical_read)
     @functools.wraps(function)
     def wrapper(cfg, *args, **kwargs):
-        with guarded_current(cfg):
+        from .compatibility_profiles import administrative_read_contract
+        enabled = historical_read and historical_current(cfg)
+        with guarded_current(cfg, historical_read=True) if enabled else guarded_current(cfg):
             return function(cfg, *args, **kwargs)
     return wrapper

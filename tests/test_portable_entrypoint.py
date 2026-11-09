@@ -111,7 +111,8 @@ def test_package_and_asset_boundaries_remain_default_deny():
 
 def test_dashboard_api_path_does_not_become_console_failure(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, 'study2.flag_binding', SimpleNamespace(
-        MANIFEST_ENV='STUDY2_MANUAL_EXCLUSION_MANIFEST', resolve_current=lambda cfg: None))
+        MANIFEST_ENV='STUDY2_MANUAL_EXCLUSION_MANIFEST', resolve_current=lambda cfg: None,
+        historical_current=lambda cfg: False))
     monkeypatch.setitem(sys.modules, 'study2.formal_dashboard', SimpleNamespace(
         main=lambda *a, **kw: tmp_path/'verified-site'))
     assert entry.dispatch(tmp_path/'cfg.json', {'state_dir': str(tmp_path/'state')},
@@ -130,7 +131,8 @@ def test_controls_capture_uses_public_config_after_trust(monkeypatch, tmp_path):
     from study2 import compatibility_profiles
     monkeypatch.setattr(compatibility_profiles, 'configure_trust', lambda *a: events.append('trust'))
     monkeypatch.setitem(sys.modules, 'study2.flag_binding', SimpleNamespace(
-        MANIFEST_ENV='STUDY2_MANUAL_EXCLUSION_MANIFEST', resolve_current=lambda cfg: None))
+        MANIFEST_ENV='STUDY2_MANUAL_EXCLUSION_MANIFEST', resolve_current=lambda cfg: None,
+        historical_current=lambda cfg: False))
     monkeypatch.setitem(sys.modules, 'study2.controls_capture', SimpleNamespace(
         main=lambda args, *, config_path: events.append((args, config_path))))
     entry.dispatch(cfg_path, {'state_dir': str(tmp_path / 'state'), 'compatibility': {

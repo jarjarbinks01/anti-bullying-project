@@ -142,7 +142,10 @@ def dispatch(config_path, cfg, arguments, *, active=None, runtime_info=False):
             from .journal_retirement import retire_if_complete
             retire_if_complete(cfg)
         from .flag_binding import MANIFEST_ENV, resolve_current
-        bound = resolve_current(cfg)
+        from .flag_binding import historical_current
+        historical_read = (runtime_info or command in {'controls-capture', 'static-export', 'dashboard', 'manifest', 'review-prepare'} or
+                           command == 'run' and '--no-publish' in arguments) and historical_current(cfg)
+        bound = resolve_current(cfg, historical_read=True) if historical_read else resolve_current(cfg)
         if bound is not None:
             os.environ[MANIFEST_ENV] = str(bound)
             from .lean_recovery import recovery_assets

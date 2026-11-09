@@ -190,3 +190,56 @@ The five robustness fixes above have focused regression coverage and independent
 source review. [Project state](PROJECT_STATE.md#robustness-follow-up) records the
 counts and limits. Targeted verification is not an exhaustive final full-suite
 pass or proof of compatibility with the active private installation.
+
+
+### Exact administrative historical reads
+
+An optional `administrative_read` object in the independently hash-pinned startup
+compatibility profile admits one unchanged administrative workload as historical evidence only.
+The original profile and accepted certificates remain retained. This is a separately reviewed
+read contract requiring independent authority, not an assertion that an
+old acceptance report accepted a new implementation.
+
+The closed contract names `study2_administrative_historical_read_v1`, the accepted
+`scope_sha256`, original `workload_pin`, current `reader_rules_hash`, scoped
+`reader_code_sha256`, full-package `reader_revision` from
+`controls_capture.code_revision()`, `recovery_manifest` pin, `recovery_root`, an
+explicit original-path-to-restored-relative `path_map`, and `original_code`
+module-to-restored-relative paths. Recovery bytes must match both their original
+pins and the native checkpoint manifest's restored-byte hashes. Path mappings
+must be reviewed against the original asset inventory; the manifest alone does
+not authenticate an earlier pre-capture path. No signed path is rewritten.
+
+The reader authenticates exact workload bytes, original scope and code, current
+publication and disposition pointer, main/decision/admin revisions, release
+inputs, canonical cases, and original native closure projection. It admits only
+the exact no-new-holds projection; drift fails rather than preparing a changed
+workload. Current reader identity remains separate from historical authority.
+
+`validate_workload`, `load_summary`, `resolve_current`, `guarded_current` and
+ordinary guarded consumers remain strict by default. Explicit read call sites for runtime information, control capture, protected dashboard validation and static export opt into the configured contract. The preparatory `manifest`, `review-prepare` and `run --no-publish` routes may authenticate this exact OLD tuple without granting publication authority. Without one, those entrypoints retain their normal strict
+behavior. Policy/workload staging and coordinated publication/recovery may authenticate their actual OLD tuple using the contract. TARGET validation and proposal application remain strict. A historical staged pointer is accepted only when equal to actual CURRENT; full publication, byte and evidence checks still apply. Downstream policy/scientific-rules checks and snapshot
+verification are unchanged and can independently refuse export. Read success
+therefore does not authorize a write-capable runtime cutover or scheduled update.
+
+### Different-release writer transition
+
+Use a genuine new scientific release, never a fabricated same-release migration.
+The startup profile's `administrative_read.scope_sha256` authenticates historical
+OLD scope bytes; `administrative_scope_sha256` independently pins the genuinely
+accepted current-source TARGET scope. Original closure bindings and events remain
+unchanged. Current scope acceptance must have real current evidence and review;
+changing old certificate hashes is not acceptance. TARGET staging also requires
+current bundle/proposal, rules, source, controls and target inventory.
+
+The existing coordinated plan retains different OLD/TARGET release IDs and
+independent acceptance. Before publication, OLD is authenticated as history;
+after publication TARGET is strictly validated. Recovery follows actual SQLite
+publication, allowing historical admission only on OLD. Retaining the historical
+profile after success does not force new readers through OLD: exact workload
+identity selects historical admission, otherwise reads remain strict.
+
+Source changes invalidate the read contract's full reader revision and current
+write preparation. Freeze source and independently review fresh bindings before
+operational preparation. Source tests do not activate databases, selectors,
+launchers or scheduled work. Same-release writer migration remains unsupported.

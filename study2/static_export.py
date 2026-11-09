@@ -1004,7 +1004,7 @@ def _input_inventory(folder, state, release_root):
 from .flag_binding import guarded_consumer
 
 
-@guarded_consumer
+@guarded_consumer(historical_read=True)
 def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=None, manual_manifest=None,
                   release_context=None, default_eligibility='off', project_selected_bd=False, controls_request=None):
     if release_context is not None and release_context.get('format') == 'study2_candidate_release_context_v1':
@@ -1012,7 +1012,10 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
     if default_eligibility not in {'off', 'on'} or default_eligibility == 'on' and release_context is None:
         raise PipelineError('Default ON requires an explicit validated dashboard release context.')
     from .flag_binding import resolve_current
-    bound = resolve_current(cfg)
+    from .compatibility_profiles import administrative_read_contract
+    from .flag_binding import historical_current
+    historical_read = historical_current(cfg)
+    bound = resolve_current(cfg, historical_read=True) if historical_read else resolve_current(cfg)
     if bound is not None and manual_manifest is not None and json.loads(bound.read_bytes()) != manual_manifest:
         raise PipelineError('Managed exclusion manifest does not match the active ledger')
     state = Path(cfg['state_dir']).resolve()
@@ -1095,7 +1098,7 @@ def export_static(cfg, destination, minimum=0, progress=None, *, school_binding=
             pins['export_program_hash'] = dict(sha256=program_hash())
         initial_files = {key: value for key, value in pins.items() if key not in {'published_summary', 'legacy_source_counts', 'supplied_school_binding', 'supplied_manual_manifest', 'supplied_release_context', 'analytical_run', 'export_program_hash', 'bd_projection_checksums'}}
         def verify():
-            if bound is not None and manual_manifest is not None and resolve_current(cfg) != bound:
+            if bound is not None and manual_manifest is not None and (resolve_current(cfg, historical_read=True) if historical_read else resolve_current(cfg)) != bound:
                 raise PipelineError('Managed exclusion binding changed during export; previous export retained.')
             now = current(db)
             counts_now = sorted(imported_source_counts(db, release['run_id']), key=lambda row: json.dumps(row, sort_keys=True))

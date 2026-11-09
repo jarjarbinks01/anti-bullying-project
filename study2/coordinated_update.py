@@ -168,7 +168,7 @@ def stage_policy(cfg, bundle_path, proposal_path, review_path, review_manifest_p
         need(selected is not None, 'managed_update_required')
         _, _, policy_path, _ = selected
         with exclusive(policy_path.parent / 'writer.lock'):
-            old_combined = binding._json(binding.resolve_current(cfg))  # Actual old tuple, no mocks.
+            old_combined = binding._json(binding.resolve_current(cfg, historical_read=binding.historical_current(cfg)))  # Authenticated OLD only.
             guard = {**proposal['base'], 'release_id': expected_old_release}
             group._guard_live(data, guard)
             with sqlite3.connect((Path(cfg['state_dir'])/'study2.sqlite').as_uri()+'?mode=ro', uri=True) as db:
@@ -462,7 +462,7 @@ def _publish_fenced(cfg, plan_pin, acceptance_pin, *, operator, fault=None,
                 expected_selection = plan['old_selection'] if owner_fence is None else plan['gate_selection']
                 need(binding._json(selection) == expected_selection, 'source_selection_changed')
                 transaction.set_environment('old')
-                binding.resolve_current(cfg)  # Real OLD ledger, policy and workload validation.
+                binding.resolve_current(cfg, historical_read=binding.historical_current(cfg))  # Authenticated OLD tuple.
                 # Revalidate the independently reviewed files before making the durable gate.
                 _load_plan(cfg, plan_pin, acceptance_pin, operator)
                 journal = {'format':'study2_coordinated_publication_journal_v1', 'status':'pending',
@@ -571,7 +571,7 @@ def _recover_fenced(cfg, *, owner_fence=None, owner_permit=None, fault=None):
                          binding._json(state/'CURRENT_REVIEW_DISPOSITION.json') == plan[side+'_workload'] and
                          binding._json(selection) == plan[side+'_selection'], 'completed_transition_tuple_changed')
                     transaction.set_environment(side)
-                    binding.resolve_current(cfg)
+                    binding.resolve_current(cfg, historical_read=side == 'old' and binding.historical_current(cfg))
                     return {'status':'complete','idempotent':True,'verified_side':side}
                 transaction.install(side)
                 # Repair the derived scientific pointer through its native API.
@@ -579,7 +579,7 @@ def _recover_fenced(cfg, *, owner_fence=None, owner_permit=None, fault=None):
                 with sqlite3.connect(state/'study2.sqlite') as db:
                     db.row_factory=sqlite3.Row
                     recover_pointer(db,cfg)
-                binding.resolve_current(cfg)
+                binding.resolve_current(cfg, historical_read=side == 'old' and binding.historical_current(cfg))
                 _complete_journal(transaction, journal, recovered_to=side)
                 return {'status':'complete','recovered_to':side,'idempotent':False}
             finally:
@@ -629,7 +629,8 @@ def _verify_completed(cfg, journal):
             manifest = binding._validate(cfg,transaction.control/'control.json',transaction.policy_path,
                                          transaction.descriptor,inventory,metadata,ledger)
             need(str(manifest) == plan[side+'_manifest'],'completed_transition_manifest_changed')
-            binding._require_current_workload(cfg,inventory,manifest,staged_pointer=plan[side+'_workload'])
+            binding._require_current_workload(cfg,inventory,manifest,staged_pointer=plan[side+'_workload'],
+                historical_read=side == 'old' and binding.historical_current(cfg))
             derived = binding._json(Path(cfg['release_dir'])/'CURRENT.json')
             row = main.execute('SELECT path FROM releases WHERE release_id=?',(actual,)).fetchone()
             locations = state/'release_locations.json'

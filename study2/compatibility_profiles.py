@@ -23,6 +23,8 @@ ADMINISTRATIVE_PREVIEW = {}
 _HISTORICAL_VERIFIERS = {}
 _SCOPE_SHA256 = None
 _CONFIGURED_SHA256 = None
+_ADMINISTRATIVE_READ = None
+ADMINISTRATIVE_READ_CONTRACT = "study2_administrative_historical_read_v1"
 
 
 def _need(condition, code):
@@ -40,7 +42,7 @@ def configure_trust(profile_path, expected_sha256):
     Repeated initialization of the same bytes is harmless. A different profile
     requires a fresh process, preventing mid-operation authority replacement.
     """
-    global _SCOPE_SHA256, _CONFIGURED_SHA256
+    global _SCOPE_SHA256, _CONFIGURED_SHA256, _ADMINISTRATIVE_READ
     _need(_hash(expected_sha256), 'file_hash_required')
     path = Path(profile_path)
     _need(path.is_absolute(), 'absolute_path_required')
@@ -54,7 +56,7 @@ def configure_trust(profile_path, expected_sha256):
           (after.st_ino, after.st_size, after.st_mtime_ns), 'file_changed')
     _need(hashlib.sha256(raw).hexdigest() == expected_sha256, 'file_hash_changed')
     value = json.loads(raw)
-    _need(isinstance(value, dict) and set(value) == {
+    _need(isinstance(value, dict) and set(value) - {'administrative_read'} == {
         'format', 'continuity_profiles', 'administrative_preview',
         'administrative_scope_sha256', 'historical_verifiers'} and value['format'] == FORMAT,
         'format')
@@ -87,12 +89,43 @@ def configure_trust(profile_path, expected_sha256):
         key = contract['profile_revision']
         _need(key not in accepted, 'duplicate_verifier_contract')
         accepted[key] = frozenset(revisions)
+    read = value.get('administrative_read')
+    if read is not None:
+        _need(isinstance(read, dict) and set(read) == {
+            'contract', 'scope_sha256', 'workload_pin', 'reader_rules_hash', 'reader_revision',
+            'reader_code_sha256', 'recovery_manifest', 'recovery_root',
+            'path_map', 'original_code'}, 'administrative_read_contract')
+        _need(read['contract'] == ADMINISTRATIVE_READ_CONTRACT and
+              _hash(read['scope_sha256']) and
+              _hash(read['reader_rules_hash']) and _hash(read['reader_revision']), 'administrative_read_scope')
+        for key in ('workload_pin', 'recovery_manifest'):
+            pin = read[key]
+            _need(isinstance(pin, dict) and set(pin) == {'path', 'sha256'} and
+                  isinstance(pin['path'], str) and Path(pin['path']).is_absolute() and
+                  _hash(pin['sha256']), 'administrative_read_pin')
+        code = read['reader_code_sha256']
+        _need(isinstance(code, dict) and bool(code) and
+              all(isinstance(k, str) and re.fullmatch(r'[a-z_]+\.py', k) and _hash(v)
+                  for k, v in code.items()), 'administrative_reader_code')
+        _need(isinstance(read['recovery_root'], str) and Path(read['recovery_root']).is_absolute(),
+              'administrative_recovery_root')
+        for key in ('path_map', 'original_code'):
+            mapping = read[key]
+            _need(isinstance(mapping, dict) and bool(mapping), 'administrative_recovery_mapping')
+            for source, relative in mapping.items():
+                _need(isinstance(source, str) and isinstance(relative, str) and bool(relative) and
+                      not Path(relative).is_absolute() and '..' not in Path(relative).parts,
+                      'administrative_recovery_mapping')
+        _need(all(Path(k).is_absolute() for k in read['path_map']) and
+              read['workload_pin']['path'] in read['path_map'] and
+              set(read['original_code']) == set(code), 'administrative_recovery_mapping')
     _need(_CONFIGURED_SHA256 in (None, expected_sha256), 'already_configured')
     if _CONFIGURED_SHA256 is not None:
         return
     CONTINUITY_PROFILES.update(deepcopy(profiles))
     ADMINISTRATIVE_PREVIEW.update(deepcopy(preview or {}))
     _HISTORICAL_VERIFIERS.update(accepted)
+    _ADMINISTRATIVE_READ = deepcopy(read)
     _SCOPE_SHA256 = scope
     _CONFIGURED_SHA256 = expected_sha256
 
@@ -107,3 +140,8 @@ def accepts_historical_implementation(profile, recorded, current):
         return True
     from .analysis_eligibility import sha
     return recorded in _HISTORICAL_VERIFIERS.get(sha(profile), ())
+
+
+def administrative_read_contract():
+    """Return isolated read-only trust, never a proposal-supplied authority."""
+    return deepcopy(_ADMINISTRATIVE_READ)

@@ -99,7 +99,9 @@ def capture(request,*,prepare_context=False):
     validate_selection(request,cfg,selected)
     allowed={guard.CONTROL_ENV,guard.POLICY_ENV,guard.MANIFEST_ENV,'STUDY2_CURRENT_REVIEW_WORKLOAD','STUDY2_REVIEW_STATE_DIR'}
     from study2 import static_controls as contract
-    with selected_environment(selected, allowed), guard.guarded_current(cfg) as manifest_path:
+    from .compatibility_profiles import administrative_read_contract
+    historical_read = guard.historical_current(cfg)
+    with selected_environment(selected, allowed), guard.guarded_current(cfg, historical_read=historical_read) as manifest_path:
         if manifest_path is None:raise ValueError('managed_binding_required')
         manifest=guard._json(manifest_path);active=group.read_active(Path(os.environ[guard.POLICY_ENV]).parent)
         folder=Path(manifest_path).parent
@@ -131,7 +133,7 @@ def capture(request,*,prepare_context=False):
             or context['group_proposal_revision']!=active['proposal']['revision']
             or context['group_implementation_revision']!=group.implementation_revision()):raise ValueError('current_controls_changed')
         workload,_=review_workload.load_summary(release_id=context['release_id'],decision_revision=state['decision_revision'],
-            exclusion_revision=manifest['revision'],cfg=cfg,review_state=cfg['state_dir'])
+            exclusion_revision=manifest['revision'],cfg=cfg,review_state=cfg['state_dir'],historical_read=historical_read)
         w=workload.get('active_workload',workload['native_workload'])
         expected=dict(child_groups=w['remaining_open_group_scopes'],phone_groups=w['similarity_scopes'],held_groups=w['held_scopes'],
             correction_comparisons=w['field_correction_comparisons'],correction_bundles=workload['correction_bundles'],adult_comparisons=w['separate_adult_comparisons'])

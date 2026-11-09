@@ -16,7 +16,7 @@ Initial entries were recorded on 2026-11-07 UTC; later entries carry their own d
 
 ## D002: Consolidate into one maintained package and client
 
-- **Date/status:** Accepted on 2026-11-07; implemented in the source revision containing this page, not activated or deployed.
+- **Date/status:** Accepted on 2026-11-07; implemented and adopted locally on 2026-11-09. Remote publication remains separate.
 - **Choice:** Both `python -m study2` and the installed `study2` command use one public entry point. Native processing stays in `study2`; presentation-specific behavior has an explicit package boundary and one readable final client source. Machine paths and historical trust bindings come from private configuration.
 - **Reason:** The code review found a CLI route that bypassed current coordination and an exporter that replaced its apparent client source with a frozen bundle. Parallel implementations made changes hard to reproduce and maintain.
 - **Consequences:** Preserve historical records and compatibility without copying older matching/storage modules into the exporter. Reuse existing controls and focused regression tests; avoid another wrapper or approval system. Consolidation alone does not activate the package. The five separately authorized review findings were resolved in the subsequent source follow-up; see [current verification](PROJECT_STATE.md#robustness-follow-up).
@@ -24,7 +24,7 @@ Initial entries were recorded on 2026-11-07 UTC; later entries carry their own d
 
 ## D003: Keep child pairing separate from adult continuity
 
-- **Date/status:** Existing implemented design, recorded on 2026-11-07. Original acceptance date was not reconstructed; the consolidated package is not yet activated.
+- **Date/status:** Existing implemented design, recorded on 2026-11-07. Original acceptance date was not reconstructed; the consolidated package was adopted locally on 2026-11-09.
 - **Choice:** The selected-child dashboard B/D view pairs the already selected parent T0/T1 responses for the same child, even when responding adults differ. Adult continuity remains explicit evidence for those exact responses. Paired parent PHQ requires confirmed same-adult continuity; per-wave PHQ remains available.
 - **Reason:** A shared child and a shared responding adult answer different research questions. One must not be inferred from the other.
 - **Consequences:** Native/historical same-adult BD outputs retain their meaning. New native runs can explicitly select the already-supported same-child policy; absent that setting, the legacy behavior and rule vector remain unchanged. A selected-child dashboard projection is labelled and does not rewrite a frozen scientific release. Excluding a selected response removes its pair without selecting a substitute.
@@ -32,7 +32,7 @@ Initial entries were recorded on 2026-11-07 UTC; later entries carry their own d
 
 ## D004: Carry decisions only within their supported scope
 
-- **Date/status:** Existing implemented design, recorded on 2026-11-07. Original acceptance date was not reconstructed; the consolidated package is not yet activated.
+- **Date/status:** Existing implemented design, recorded on 2026-11-07. Original acceptance date was not reconstructed; the consolidated package was adopted locally on 2026-11-09.
 - **Choice:** Preserve decision intent with its subjects, relevant evidence and supported boundaries. Apply it to a later release only when the existing continuity and scope requirements are met. Changed evidence, missing subjects or unsupported comparisons stay held.
 - **Reason:** Release-specific group IDs alone do not express what was decided. An earlier answer must neither disappear merely because grouping changed nor silently authorize newly added relationships.
 - **Consequences:** Retain earlier decisions, exclusions, closures and review history. New parent edges do not inherit an old closure. Administrative carry-forward does not write a new identity decision, and activation can retain unresolved holds. The 2026-11-08 source follow-up removes a held intent from active workload only when its complete original subject scope is excluded; incomplete scope remains held. Undo migration resolves the original acceptance through immutable, hash-verified restoration links rather than treating the undo event as new acceptance.
@@ -56,8 +56,16 @@ Initial entries were recorded on 2026-11-07 UTC; later entries carry their own d
 
 ## D007: Keep byte-based checkpoints on DELETE-mode SQLite
 
-- **Date/status:** Implemented on 2026-11-08 as part of the authorized robustness fixes; not activated against research state.
+- **Date/status:** Implemented on 2026-11-08 as part of the authorized robustness fixes; included in local adoption on 2026-11-09.
 - **Choice:** Refuse checkpoint creation or reuse when either native database uses a journal mode other than DELETE. Check the mode inside the existing held read transaction before hashing main-file bytes. Do not change live modes or delete SQLite sidecars automatically.
 - **Reason:** Checkpoint reuse is keyed to main-file bytes. WAL may contain committed changes without changing those bytes; supporting it correctly would require a different snapshot/reuse contract. An explicit restriction fits the existing local checkpoint design without another storage abstraction.
 - **Consequences:** A refused attempt preserves the previous checkpoint and live data. An operator must plan any journal-mode maintenance separately. Synthetic regressions cover main/review databases, forced/non-forced saves, and an existing checkpoint with newer committed WAL data. This is not a claim of WAL support or live activation compatibility.
 - **Sources:** [checkpoint implementation](../study2/checkpoints.py), [checkpoint regressions](../tests/test_checkpoints.py), [recovery contract](PORTABLE_WORKFLOW.md#recovery), and the independently reviewed robustness follow-up.
+
+## D008: Separate exact historical reads from current write authority
+
+- **Date/status:** Integrated on 2026-11-09 with OLD-only transition admission; source review found no blocker. Synthetic verification and the separately completed local adoption are recorded in project state. Remote publication remains separate.
+- **Choice:** Extend the existing startup-pinned compatibility profile with an optional exact administrative historical-read contract. It pins the unchanged workload and accepted scope, the current reader implementation and rules, and original source/evidence bytes through an independently pinned recovery manifest and explicit relocation mapping. Existing profiles remain valid without this optional contract.
+- **Reason:** Relocating and reading an accepted historical workload must not turn its old source certificate into authority for new writes. Reuse the existing canonical-case and native closure checks, preserving original signed paths and identities.
+- **Consequences:** Shared validators remain strict by default. Runtime information, control capture, protected dashboard validation and static snapshot export opt into an exact configured read contract. Preparation and coordinated transition may authenticate only their actual OLD tuple through that contract. Any workload, publication, control, evidence, history or reader drift fails; no new holds, closures or workloads are derived. Policy rules and snapshot verification remain mandatory. The optional profile is separate read authority requiring its own exact review; earlier acceptance does not approve it. A genuinely different TARGET requires a separately accepted current-source administrative scope, fresh bundle/proposal and independently reviewed publication tuple. The retained historical scope is not rewritten or promoted into write authority. Recovery chooses OLD or TARGET by actual SQLite publication; only OLD can use historical admission. Default run and scheduled update routes stay strict.
+- **Sources:** [administrative validator](../study2/administrative_carry_current.py), [compatibility profile](../study2/compatibility_profiles.py), [historical-read regressions](../tests/test_administrative_historical_read.py), and [read contract](PORTABLE_WORKFLOW.md#exact-administrative-historical-reads).

@@ -423,8 +423,13 @@ def recover_pointer(db, cfg):
         value = json.loads(pointer.read_text()) if pointer.exists() else None
     except (OSError, ValueError):
         value = None
-    if release and (not value or value.get("release_id") != release["release_id"]):
-        atomic_json(pointer, {"release_id": release["release_id"], "path": release["path"], "recovered_at": utcnow()})
+    if release:
+        # store.current already applies the existing release_locations mapping.
+        path = release['path']
+        if not isinstance(path, str) or not path:
+            raise PipelineError('Invalid release location path')
+        if not value or value.get("release_id") != release["release_id"] or value.get('path') != path:
+            atomic_json(pointer, {"release_id": release["release_id"], "path": path, "recovered_at": utcnow()})
     elif not release and pointer.exists():
         pointer.unlink()
 
