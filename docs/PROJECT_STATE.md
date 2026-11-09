@@ -24,6 +24,16 @@ The [decision log](DECISIONS.md) explains consequential choices. Current method 
 - A genuine new-data release was published locally, its completed journal retired, and the full formal dashboard rendered. The installed package, launchers and default binding now use the frozen consolidated source. Protected startup passed current-context validation and all 67 asset hashes.
 - The existing 15-minute queued-batch scheduler was restored; its first actual invocation exited successfully with no ready batches. Browser visual QA awaits user login and is not claimed as passed. No source push, private-repository publication or Vercel deployment is included in this local adoption.
 
+## Isolated publication-performance follow-up
+
+Implemented on `perf/publication-verification-20261109`, separately from the adopted runtime. Tracking revisions, backup output and publication comparisons stream the existing canonical rows instead of retaining multiple complete histories. Successful backup integrity results are reused only within one operation after authenticating current content. Both retirement verification boundaries and all mutable-state checks remain.
+
+- Frozen-source selection: 174 focused synthetic cases passed, with the explicitly opt-in memory benchmark skipped in that selection and passed separately. Coverage includes canonical digest parity, malformed/changed history refusal, cache invalidation, real interrupted publication/retirement, changed-input recovery and historical-to-current writer transition. After retaining the final dynamic tracking recheck, 80 focused recovery/retirement cases passed and a new concurrent-WAL-publication refusal regression passed separately. The compressed-backup restore recheck also passed; the other three compressed cases passed in earlier focused checks.
+- Native synthetic instrumentation reduced full release-backup integrity scans from nine to two per publication and eight to two per retirement. This measures scan count, not an end-to-end live speedup.
+- A separate 500,000-event digest/comparison benchmark used 17,489 bytes peak traced Python allocation and 96.75 seconds with tracing enabled. It excludes existing saved-JSON parsing, recovery dictionaries, SQLite-native buffers and whole-process RSS. The earlier equivalent streaming benchmark also passed.
+- Independent review caught and resolved malformed non-list backup tables hashing as empty arrays. Their original authentication semantics are now preserved and tested. Review found no remaining blocker. Initial source-change refusals, source-tree read stalls and interrupted checks are not counted as passing; final checks used a frozen temporary source copy.
+- No live source, runtime configuration, scheduler, research state or deployment was changed. A local source commit is not activation. New applicable source/runtime bindings are still required before adopting this optimization.
+
 ## Remaining work
 
 1. Complete authenticated browser visual QA after user login. Track source review/publication, private repository publication and Vercel verification separately from the completed local adoption. Reuse valid artifacts; do not rematch for a presentation-only change.

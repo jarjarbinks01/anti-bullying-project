@@ -16,7 +16,7 @@ from .common import PipelineError, atomic_json, digest, dumps, file_hash, secure
 from .matching import assign_children, link_records, select_waves
 from .outputs import write_excel, write_outputs
 from .review import active_decisions, apply_field_decisions, validation_report
-from .store import backup, backup_path, connect, current, ingest, writer_lock
+from .store import backup, connect, current, ingest, writer_lock, verify_backup_integrity
 from .storage import read_records, store_record, record_value_cache
 from .artifacts import artifact_cache, freeze_file, logical_hash
 
@@ -299,13 +299,7 @@ def verify_release(db, release_id):
         if not (path/'backup.retention.json').exists():
             raise PipelineError('Full recovery backup is unavailable without a retention record')
         return result
-    with backup_path(path / 'backup.sqlite', expected_backup) as restored:
-        snapshot = sqlite3.connect(restored.resolve().as_uri() + '?mode=ro', uri=True)
-        try:
-            if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise PipelineError("Release backup failed integrity check")
-        finally:
-            snapshot.close()
+    verify_backup_integrity(path / 'backup.sqlite', expected_backup)
     return result
 
 

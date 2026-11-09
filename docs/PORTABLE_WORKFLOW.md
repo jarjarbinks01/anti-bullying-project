@@ -243,3 +243,24 @@ Source changes invalidate the read contract's full reader revision and current
 write preparation. Freeze source and independently review fresh bindings before
 operational preparation. Source tests do not activate databases, selectors,
 launchers or scheduled work. Same-release writer migration remains unsupported.
+
+
+### Publication verification cost
+
+The performance implementation streams the existing canonical tracking format and
+compares pre/post-publication rows without retaining two full histories. Its
+pre-write reader is closed before SQLite commit, including refusal paths.
+Repeated release checks still authenticate current artifact and backup bytes;
+only a successful full backup integrity result is reused within the current
+coordinated operation. Independent operations start fresh, changed content must authenticate again,
+and failed verification is never cached. Compressed bytes are tied to the verified logical
+backup digest, not a filename or modification time.
+
+Completed-journal retirement retains both native verification calls and its
+final mutable-tuple, ownership and exact-archive checks. The shared operation
+scope avoids repeating identical backup integrity scans across those calls.
+Existing saved-backup JSON parsing and some recovery comparisons remain
+materialized. The focused synthetic memory benchmark describes only streaming
+tracking digests/comparisons, not whole-publication memory or live update timing.
+Installing or committing this optimization does not activate it, republish data,
+change current runtime bindings or deploy the dashboard.

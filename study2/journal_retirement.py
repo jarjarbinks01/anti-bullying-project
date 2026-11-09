@@ -195,6 +195,7 @@ def retire_completed(cfg, *, expected_sha256, expected_side, archive_directory, 
          and expected_side in ('old', 'target'), 'explicit_expected_identity_required')
     fault = fault or (lambda phase: None)
     update, locks, binding = native()
+    from .store import release_verification_cache
     state_path = Path(cfg['state_dir'])
     archive_name = expected_sha256 + '.json'
     archive_path = Path(archive_directory)
@@ -206,7 +207,7 @@ def retire_completed(cfg, *, expected_sha256, expected_side, archive_directory, 
              archive_path.is_relative_to(Path(asset.get('path', '')))
              for asset in cfg.get('recovery_policy', {}).get('required_assets', [])),
          'archive_not_recovery_declared')
-    with BoundDirectory(state_path) as state, ExitStack() as stack:
+    with release_verification_cache(), BoundDirectory(state_path) as state, ExitStack() as stack:
         # Determine policy root from native control parsing, without changing it.
         selected = binding._control(cfg)
         need(selected is not None, 'managed_update_required')

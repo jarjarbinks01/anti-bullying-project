@@ -66,7 +66,7 @@ def _complete_journal(transaction, expected, *, recovered_to=None):
     from .flag_binding import _current_inventory
     current = _current_inventory(transaction.cfg).release_id
     if current == transaction.plan['target_release_id']:
-        need(latest.get('post_tracking_revision') == digest(transaction.tracking()),
+        need(latest.get('post_tracking_revision') == transaction.tracking_revision(),
              'transition_post_tracking_revision_missing_or_changed')
     value = {**latest, 'status':'complete'}
     if recovered_to is not None:
@@ -272,6 +272,13 @@ class Transition:
             db.row_factory = sqlite3.Row
             return workspace_snapshot(db)
 
+    def tracking_revision(self):
+        from .dyad_operator import workspace_revision
+        if self.main_db is not None:
+            return workspace_revision(self.main_db)
+        with _read_snapshot(self.state/'study2.sqlite') as db:
+            return workspace_revision(db)
+
     def validate_inputs(self, *, check_tracking=True):
         from . import flag_binding as binding, group_cleaning_operator as group, runner
         self.assert_locks()
@@ -286,7 +293,7 @@ class Transition:
                         published = read.execute('SELECT release_id FROM publication WHERE singleton=1').fetchone()[0]
                     if published == self.plan['target_release_id']:
                         expected = journal['post_tracking_revision']
-            need(digest(self.tracking()) == expected, 'issued_id_or_restriction_history_changed')
+            need(self.tracking_revision() == expected, 'issued_id_or_restriction_history_changed')
         for pin in self.plan['input_pins']:
             group._read_file(pin)
         with sqlite3.connect((self.state/'study2.sqlite').as_uri()+'?mode=ro', uri=True) as db:
@@ -328,28 +335,15 @@ class Transition:
     def before_commit(self):
         self.assert_locks()
         self.validate_inputs(check_tracking=False)
-        current = self.tracking()
-        baseline = self.baseline_tracking
-        need(set(current) == set(baseline), 'tracking_schema_changed')
-        for table, old in baseline.items():
-            after = current[table]
-            if table == 'dyad_registry':
-                indexed = {r['dyad_id']:r for r in after}
-                need(set(indexed) == {r['dyad_id'] for r in old}, 'issued_id_set_changed')
-                for row in old:
-                    new = indexed[row['dyad_id']]
-                    need(all(new[k] == v for k,v in row.items() if k not in {'lifecycle','first_published_run_id'}), 'issued_id_anchor_changed')
-                    need(row['first_published_run_id'] is None or new['first_published_run_id'] == row['first_published_run_id'], 'issued_id_first_publication_changed')
-                    need(row['lifecycle'] != 'retired' or new['lifecycle'] == 'retired', 'retired_id_reactivated')
-            elif table == 'dyad_events':
-                known = {digest(r) for r in old}
-                need(known <= {digest(r) for r in after}, 'tracking_history_removed')
-                added = [r for r in after if digest(r) not in known]
-                need(all(r['kind'] == 'published_mapping' and json.loads(r['payload_json']).get('run_id') == self.plan['target_release_id'] for r in added), 'unrelated_tracking_history_changed')
-            else:
-                need(after == old, 'unrelated_tracking_table_changed')
+        from .dyad_operator import check_publication_tracking
+        # Release the pre-write reader before SQLite commits, including failures.
+        try:
+            check_publication_tracking(self.baseline_db, self.main_db, self.plan['target_release_id'])
+            revision = self.tracking_revision()
+        finally:
+            self.baseline_db.close()
         journal = _journal_latest(self.state, self.journal_seed)
-        _durable(self.state/JOURNAL, {**journal,'post_tracking_revision':digest(current)}, self.fault, 'post_tracking')
+        _durable(self.state/JOURNAL, {**journal,'post_tracking_revision':revision}, self.fault, 'post_tracking')
         self.install('target')
         self.fault('before_sqlite_commit')
         self.assert_locks()
@@ -427,10 +421,11 @@ def _publish_fenced(cfg, plan_pin, acceptance_pin, *, operator, fault=None,
                     owner_fence=None, owner_permit=None):
     """Run the unchanged real publisher, with a reviewed coordinated tuple."""
     from . import flag_binding as binding, runner
+    from .store import release_verification_cache
     plan = _load_plan(cfg, plan_pin, acceptance_pin, operator)
     transaction = Transition(cfg, plan, operator, fault)
     transaction.consumer_owner, transaction.consumer_permit = owner_fence, owner_permit
-    with exclusive(transaction.state/'writer.lock'), exclusive(transaction.policy_path.parent/'writer.lock'):
+    with release_verification_cache(), exclusive(transaction.state/'writer.lock'), exclusive(transaction.policy_path.parent/'writer.lock'):
         if owner_fence is None:
             require_available(transaction.state)
         else:
@@ -474,11 +469,12 @@ def _publish_fenced(cfg, plan_pin, acceptance_pin, *, operator, fault=None,
                          _owner_journal(plan_pin, acceptance_pin, operator, plan),
                          'owner_draining_journal_changed')
                 _durable(transaction.state/JOURNAL, journal, transaction.fault, 'journal')
-                transaction.baseline_tracking = transaction.tracking()
                 if owner_fence is None:
                     _durable(selection, plan['gate_selection'], transaction.fault, 'gate')
                 transaction.fault('after_gate')
-                result = runner.publish_release(main, cfg, plan['target_release_id'])
+                with _read_snapshot(transaction.state/'study2.sqlite') as baseline:
+                    transaction.baseline_db = baseline
+                    result = runner.publish_release(main, cfg, plan['target_release_id'])
                 transaction.main_db = None
                 transaction.fault('after_sqlite_commit')
                 transaction.set_environment('target')
@@ -542,6 +538,7 @@ def publish(cfg, plan_pin, acceptance_pin, *, operator, fault=None, owner_fence=
 def _recover_fenced(cfg, *, owner_fence=None, owner_permit=None, fault=None):
     """Private fixture engine only; pending recovery may reopen consumers."""
     from . import flag_binding as binding
+    from .store import release_verification_cache
     state = Path(cfg['state_dir']).resolve()
     path = state/JOURNAL
     need(path.is_file() and not path.is_symlink(), 'transition_journal_required')
@@ -551,7 +548,7 @@ def _recover_fenced(cfg, *, owner_fence=None, owner_permit=None, fault=None):
     need(plan['revision'] == journal['plan_revision'], 'transition_journal_plan_changed')
     transaction = Transition(cfg, plan, journal['operator'], fault)
     transaction.consumer_owner, transaction.consumer_permit = owner_fence, owner_permit
-    with exclusive(state/'writer.lock'), exclusive(transaction.policy_path.parent/'writer.lock'):
+    with release_verification_cache(), exclusive(state/'writer.lock'), exclusive(transaction.policy_path.parent/'writer.lock'):
         if owner_fence is not None:
             from .consumer_owner_fence import require_publication_fence
             require_publication_fence(owner_fence, owner_permit, cfg, plan)
@@ -605,13 +602,14 @@ def _read_snapshot(path):
 def _verify_completed(cfg, journal):
     """Read-only completed verification; never repairs or opens any gate."""
     from . import flag_binding as binding
+    from .store import release_verification_cache
     state = Path(cfg['state_dir']).resolve()
     plan = _load_plan(cfg,journal['plan_pin'],journal['acceptance_pin'],journal['operator'])
     need(plan['revision'] == journal['plan_revision'],'transition_journal_plan_changed')
     transaction = Transition(cfg,plan,journal['operator'])
     locks = (state/'writer.lock',transaction.policy_path.parent/'writer.lock')
     need(all(p.is_file() and not p.is_symlink() for p in locks),'verification_lock_missing')
-    with exclusive(locks[0]), exclusive(locks[1]):
+    with release_verification_cache(), exclusive(locks[0]), exclusive(locks[1]):
         need(binding._json(state/JOURNAL) == journal and journal.get('status') == 'complete',
              'transition_journal_changed')
         with _read_snapshot(state/'study2.sqlite') as main, _read_snapshot(state/'review.sqlite'), binding._locked_registry(transaction.registry) as (metadata, ledger):
