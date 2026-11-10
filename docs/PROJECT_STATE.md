@@ -1,6 +1,6 @@
 # Project state
 
-Updated: 2026-11-09 UTC. This page describes development status, not live research data. Check the working branch and linked sources before acting.
+Updated: 2026-11-10 UTC. This page describes development status, not live research data. Check the working branch and linked sources before acting.
 
 ## Purpose and boundaries
 
@@ -11,6 +11,12 @@ Study 2 links responses about the same child, selects T0/T1 observations, preser
 - **Private local research:** source workbooks, databases, participant-level decisions, release evidence, machine configuration and credentials. These do not belong in either repository's published documentation or deployment bundle.
 
 The [decision log](DECISIONS.md) explains consequential choices. Current method definitions remain in [matching rules](MATCHING_RULES.md), [data model](DATA_MODEL.md) and [descriptive analysis](DESCRIPTIVE_ANALYSIS.md). Do not duplicate those specifications here.
+
+## Exporter dependency maintenance (2026-11-10)
+
+Prepared for review from public `main` at `d2bd7c3` (PR #21). The generated `package.json` and `package-lock.json` templates now both pin `@vercel/functions` to `3.11.0`; the regenerated lock also updates its required OIDC, CLI-config and Zod dependencies. A synthetic export regression checks the generated dependency pair and linked lock entries.
+
+Verification: 50 focused exporter/access tests passed. Under Node 24.14.0, a synthetic export passed `npm ci --ignore-scripts`, `npm run build` (58 allowlisted public assets), and the `@vercel/functions` entrypoint import check. Independent source/registry review found no blocker. After making the new regression independent of Node availability, its optional single-test rerun stalled during Python import and was interrupted; that rerun is not counted as passed. This is source maintenance only: no real-data export, runtime activation or deployment was performed; the full test suite and hosted behavior were not rechecked. Earlier milestone notes below retain their original operational scope.
 
 ## Current milestone
 

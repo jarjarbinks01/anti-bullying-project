@@ -295,7 +295,7 @@ server.listen(Number(process.env.PORT)||8766,'127.0.0.1',()=>console.log('Local 
 
 PACKAGE = json.dumps(dict(name='study2-protected-dashboard',version='1.0.0',private=True,
     type='module',engines=dict(node='24.x'),scripts=dict(build='node build.mjs',preview='node preview.mjs'),
-    dependencies={'@vercel/functions':'3.10.1'}), indent=2) + '\n'
+    dependencies={'@vercel/functions':'3.11.0'}), indent=2) + '\n'
 
 ACCESS_FILES = {'server/access-core.js':ACCESS_CORE,'middleware.js':MIDDLEWARE,
                 'api/auth.js':AUTH_API,'login.html':LOGIN_HTML,'login.css':LOGIN_CSS,
@@ -445,20 +445,20 @@ PACKAGE_LOCK = r'''{
       "name": "study2-protected-dashboard",
       "version": "1.0.0",
       "dependencies": {
-        "@vercel/functions": "3.10.1"
+        "@vercel/functions": "3.11.0"
       },
       "engines": {
         "node": "24.x"
       }
     },
     "node_modules/@vercel/cli-config": {
-      "version": "0.3.1",
-      "resolved": "https://registry.npmjs.org/@vercel/cli-config/-/cli-config-0.3.1.tgz",
-      "integrity": "sha512-sISbygqlFXYb8qfPu/+2Cf/A8IjrlAuZePdag3EDQr2PRA455s7UZtl9Ro674CWsB/saBRmz3jEkw0YsQs8OoQ==",
+      "version": "0.3.7",
+      "resolved": "https://registry.npmjs.org/@vercel/cli-config/-/cli-config-0.3.7.tgz",
+      "integrity": "sha512-bHFJcUF2sUsB/6XfS+BWAYjD7DIt1xyhz6oOAvGEBua0S4P+pKQ04O6vZ3jLw1HMX1ZNKP9lyGpoiqgToqI7GQ==",
       "license": "Apache-2.0",
       "dependencies": {
         "xdg-app-paths": "5",
-        "zod": "4.1.11"
+        "zod": "^4.6.6"
       }
     },
     "node_modules/@vercel/cli-exec": {
@@ -474,12 +474,12 @@ PACKAGE_LOCK = r'''{
       }
     },
     "node_modules/@vercel/functions": {
-      "version": "3.10.1",
-      "resolved": "https://registry.npmjs.org/@vercel/functions/-/functions-3.10.1.tgz",
-      "integrity": "sha512-Ca7peSyID6CW5a9Pyu6rDK2AC3n9hyJD0aTBuO74x9eL50Z+rgXIR0H0umI6j0gb9NMG7jvrx7DUhMGuuOFxsg==",
+      "version": "3.11.0",
+      "resolved": "https://registry.npmjs.org/@vercel/functions/-/functions-3.11.0.tgz",
+      "integrity": "sha512-LKwNcV4Jwb8GpovADePfassmsR2gRL5OeKcQzrWfLOJaRX3MHbeUPqAurCAneKrKa8hxnWa4H5bCFreLSvHedA==",
       "license": "Apache-2.0",
       "dependencies": {
-        "@vercel/oidc": "4.0.1"
+        "@vercel/oidc": "4.0.7"
       },
       "engines": {
         "node": ">= 20"
@@ -498,12 +498,12 @@ PACKAGE_LOCK = r'''{
       }
     },
     "node_modules/@vercel/oidc": {
-      "version": "4.0.1",
-      "resolved": "https://registry.npmjs.org/@vercel/oidc/-/oidc-4.0.1.tgz",
-      "integrity": "sha512-l//xMmDTj2WR6EMtfA2BEF2oR7ViKCD1SCxqFKCn1/8wOZBxgxhxkegSGi90ICTc1rB50ZbKuPIslc8aJxAqew==",
+      "version": "4.0.7",
+      "resolved": "https://registry.npmjs.org/@vercel/oidc/-/oidc-4.0.7.tgz",
+      "integrity": "sha512-ZiplzlXLWdKPj36yp23LBwaKWt4hR+kNULULeMVwtrx+iDpxnMk1nFKiHEtUWRjGpnqi/rDGwtnE/Xkfl9xXvQ==",
       "license": "Apache-2.0",
       "dependencies": {
-        "@vercel/cli-config": "0.3.1",
+        "@vercel/cli-config": "0.3.7",
         "@vercel/cli-exec": "1.0.1",
         "jose": "^5.9.6"
       },
@@ -733,9 +733,9 @@ PACKAGE_LOCK = r'''{
       }
     },
     "node_modules/zod": {
-      "version": "4.1.11",
-      "resolved": "https://registry.npmjs.org/zod/-/zod-4.1.11.tgz",
-      "integrity": "sha512-WPsqwxITS2tzx1bzhIKsEs19ABD5vmCVa4xBo2tq/SrV4RNZtfws1EnCWQXM6yh8bD08a1idvkB5MZSBiZsjwg==",
+      "version": "4.6.7",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
+      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
       "license": "MIT",
       "funding": {
         "url": "https://github.com/sponsors/colinhacks"
