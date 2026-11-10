@@ -84,23 +84,25 @@ def build_cube(rows,role,view,groups,anchor):
     for group in groups:
         block=group_rows(rows,group)
         waves={w:block.loc[block.wave.eq(w)] for w in ('T0','T1')}
+        # Empty groups emit null vectors and never consume normalized values.
+        # Prepare each wave/variable only when its first populated grade needs
+        # it, then reuse the exact same series for the remaining grade cells.
         prepared={}
-        for meta in schema:
-            key=(meta['wave'],meta['variable_id'])
-            if key not in prepared:prepared[key]=values_and_status(waves[meta['wave']],varmap[meta['variable_id']])
         if pschema:
             a,b=_validate_pairs(block)
             if not a['_grade'].reset_index(drop=True).equals(b['_grade'].reset_index(drop=True)):
                 raise PipelineError('Formal grade cohort must remain fixed at baseline.')
-            pair_values={m['variable_id']:(values_and_status(a,varmap[m['variable_id']])[0],
-                values_and_status(b,varmap[m['variable_id']])[0]) for m in pschema}
+            pair_values={}
         for code in CODES:
             counts={w:int(waves[w]._grade.eq(code).sum()) for w in waves}
             cell=dict(group=group,grade_code=code,counts=counts,statistics=None,pairs=None)
             if sum(counts.values()):
                 stats=[]
                 for meta in schema:
-                    wave=meta['wave'];values,status=prepared[(wave,meta['variable_id'])]
+                    wave=meta['wave'];key=(wave,meta['variable_id'])
+                    if key not in prepared:
+                        prepared[key]=values_and_status(waves[wave],varmap[meta['variable_id']])
+                    values,status=prepared[key]
                     mask=waves[wave]._grade.eq(code);v=values.loc[mask].dropna();s=status.loc[mask]
                     n=len(v);mean,m2=moments(v) if meta['kind']=='continuous' else (None,None)
                     num=None
@@ -110,7 +112,10 @@ def build_cube(rows,role,view,groups,anchor):
                     stats.append([counts[wave],n,counts[wave]-n,int(s.eq('outside_report_range').sum()),mean,m2,num,n])
                 pairs=[]
                 for meta in pschema:
-                    av,bv=pair_values[meta['variable_id']];mask=a._grade.eq(code)
+                    key=meta['variable_id']
+                    if key not in pair_values:
+                        pair_values[key]=(values_and_status(a,varmap[key])[0],values_and_status(b,varmap[key])[0])
+                    av,bv=pair_values[key];mask=a._grade.eq(code)
                     av,bv=av.loc[mask],bv.loc[mask];va,vb=av.notna(),bv.notna();both=va&vb
                     n=int(both.sum());pairs.append([len(av),n,len(av)-n,int((va&~vb).sum()),int((~va&vb).sum()),int((~va&~vb).sum()),
                         *moments(av.loc[both]),*moments(bv.loc[both]),*moments(bv.loc[both]-av.loc[both])])

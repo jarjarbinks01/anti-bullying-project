@@ -28,6 +28,21 @@ Export into a separate empty folder, or an exporter-owned complete folder. Unrel
 
 The complete application contains index.html, app.js, styles.css, snapshot.js, scope-index.js, scope-engine.js, quality-ui.js, access/login assets, middleware.js, api/auth.js, server/access-core.js, build.mjs, deployment verification scripts, package pins and vercel.json. All snapshot/index assets pass through the original authentication gate. CSP uses self-hosted scripts; data responses remain private and no-store. Credentials and session signing material are server runtime values and must never be added to artifacts or browser payloads.
 
+## Generation cost
+
+Monthly trend export requests only its seven displayed metrics from the native
+statistics function. Its optional `selected_variables` argument preserves
+dictionary order, denominators, missing-value rules and numerical calculations;
+empty or unsupported selections are rejected. The default full report remains
+unchanged.
+
+Grade aggregation normalizes a wave/metric only when the first populated grade
+in that group consumes it, then reuses that same series within the group. Empty
+cells retain their explicit zero counts and null vectors. Formal pair and
+baseline-grade checks still run before partitioning, and parent PHQ eligibility
+still comes from the original whole scope. Nothing is cached across exports or
+data revisions, and these changes do not authorize a research rerun or deployment.
+
 ## Release gates
 
 1. Review the frozen synthetic code and evidence. The existing independent reviewer and leader decide acceptance.

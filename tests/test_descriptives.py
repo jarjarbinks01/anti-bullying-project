@@ -58,6 +58,45 @@ def inputs():
     return frame,parents,pd.DataFrame(measurements),records
 
 
+@pytest.mark.parametrize('role', ['student', 'parent'])
+@pytest.mark.parametrize('empty', [False, True])
+def test_selected_statistics_match_full_report_in_dictionary_order(inputs, role, empty):
+    frame, parents, measurements, _ = inputs
+    rows = cohort(frame, parents, measurements, 'abcd', role)
+    if empty:
+        rows = rows.iloc[:0].copy()
+    before = rows.copy(deep=True)
+    chosen = ['dem_child_age', 'phq_band', 'TBV_prevalence1', 'PHQ_total', 'PHQ_total']
+    complete = statistics(rows, role, GROUPS, 'synthetic-release')
+    expected = complete.loc[complete.variable_id.isin(chosen)].reset_index(drop=True)
+    actual = statistics(rows, role, GROUPS, 'synthetic-release', selected_variables=chosen)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    pd.testing.assert_frame_equal(rows, before, check_exact=True)
+
+
+@pytest.mark.parametrize('chosen,section', [([], None), (['missing'], None),
+    (['dem_adult_age'], None), (['PHQ_total'], 'student')])
+def test_selected_statistics_reject_unavailable_requests(inputs, chosen, section):
+    frame, parents, measurements, _ = inputs
+    rows = cohort(frame, parents, measurements, 'abcd', 'student')
+    with pytest.raises(ValueError, match='unavailable'):
+        statistics(rows, 'student', section=section, selected_variables=chosen)
+
+
+def test_selected_statistics_does_not_prepare_discarded_variables(inputs, monkeypatch):
+    import study2.descriptives as module
+    frame, parents, measurements, _ = inputs
+    rows = cohort(frame, parents, measurements, 'abcd', 'student')
+    calls = []
+    original = module.values_and_status
+    def observe(sample, variable):
+        calls.append(variable.key)
+        return original(sample, variable)
+    monkeypatch.setattr(module, 'values_and_status', observe)
+    statistics(rows, 'student', selected_variables=['PHQ_total'])
+    assert calls == ['PHQ_total', 'PHQ_total']
+
+
 def test_question_meanings_relationship_not_gender_and_topcoded_children():
     r=observation('p',role='parent')
     value=demographic_values(r, {'age_at_observation':10})

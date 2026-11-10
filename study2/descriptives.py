@@ -183,7 +183,15 @@ def values_and_status(rows, variable):
     return values.where(status.eq('valid')), status
 
 
-def statistics(rows, role, groups=('all',), release_id='', section=None):
+def statistics(rows, role, groups=('all',), release_id='', section=None, *, selected_variables=None):
+    # Restrict work before aggregation, retaining dictionary order and the
+    # exact calculation used by full reports. This is not a cohort filter.
+    chosen = variables(role, section)
+    if selected_variables is not None:
+        requested = set(selected_variables)
+        if not requested or requested - {var.key for var in chosen}:
+            raise ValueError('Variables are unavailable for this role or section')
+        chosen = [var for var in chosen if var.key in requested]
     records = []
     mode = rows['report_mode'].iloc[0] if len(rows) else rows.attrs.get('mode', '')
     anchor = rows['grouping_anchor'].iloc[0] if len(rows) else ''
@@ -191,7 +199,7 @@ def statistics(rows, role, groups=('all',), release_id='', section=None):
         grouped = group_rows(rows, group)
         for wave in ('T0', 'T1'):
             sample = grouped[grouped['wave'].eq(wave)]
-            for var in variables(role, section):
+            for var in chosen:
                 values, status = values_and_status(sample, var)
                 valid = values.dropna()
                 base = dict(release_id=release_id, report_version=VERSION, dictionary_version=DICTIONARY_VERSION,
