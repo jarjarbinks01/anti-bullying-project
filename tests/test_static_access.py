@@ -25,6 +25,24 @@ def site(tmp_path_factory):
     return path
 
 
+def test_generated_dependency_and_lockfile_stay_aligned(tmp_path):
+    site = tmp_path / 'site'
+    write_site(sample(), site)
+    package = json.loads((site / 'package.json').read_text())
+    lock = json.loads((site / 'package-lock.json').read_text())
+    expected = {'@vercel/functions': '3.11.0'}
+    assert package['dependencies'] == lock['packages']['']['dependencies'] == expected
+    functions = lock['packages']['node_modules/@vercel/functions']
+    assert functions['version'] == expected['@vercel/functions']
+    assert functions['resolved'].endswith('/functions-3.11.0.tgz')
+    assert functions['integrity'] == (
+        'sha512-LKwNcV4Jwb8GpovADePfassmsR2gRL5OeKcQzrWfLOJaRX3MHbeUPqAurCAneKrKa8hxnWa4H5bCFreLSvHedA=='
+    )
+    oidc = lock['packages']['node_modules/@vercel/oidc']
+    assert oidc['version'] == functions['dependencies']['@vercel/oidc']
+    assert lock['packages']['node_modules/@vercel/cli-config']['version'] == oidc['dependencies']['@vercel/cli-config']
+
+
 def node(site, body):
     setup='''
 import assert from 'node:assert/strict';
