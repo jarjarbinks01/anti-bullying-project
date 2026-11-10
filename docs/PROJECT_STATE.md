@@ -12,6 +12,15 @@ Study 2 links responses about the same child, selects T0/T1 observations, preser
 
 The [decision log](DECISIONS.md) explains consequential choices. Current method definitions remain in [matching rules](MATCHING_RULES.md), [data model](DATA_MODEL.md) and [descriptive analysis](DESCRIPTIVE_ANALYSIS.md). Do not duplicate those specifications here.
 
+## Dashboard computation follow-up (2026-11-10)
+
+Implemented locally on `perf/dashboard-computation-20261110` and rebased onto fetched public `main` at `1322948` (PR #22), which includes dependency-maintenance commit `287fba0` and PR #21 merge `d2bd7c3`. The rebase was conflict-free and preserved the complete source tree. Monthly static trends now request only their seven exported metrics from the unchanged native calculation. Grade cells prepare normalized values only when a populated group needs them, retaining explicit empty cells and the existing pair checks. No persistent cache, cohort reselection or scientific definition change is introduced.
+
+- A synthetic profile of 80 student rows across 12 source/school views identified repeated value/status preparation as the largest cumulative cost. The bounded changes reduced those calls from 27,528 to 18,974. Profiled runtime was 78.95 seconds before and 59.18 seconds after; all resulting view JSON bytes were identical. This single small synthetic measurement is not an end-to-end research-export speedup claim.
+- The focused descriptives, static export, grade, paired inference and pairing-projection selection passed 133 cases. Seven final checks passed after strengthening the missing-status fixture and adding three early pair-refusal regressions, for 136 distinct passing cases. Existing pandas deprecation warnings remain. Independent source review found no blocker. The full repository suite and hosted browser behavior were not rerun.
+- After the conflict-free rebase onto PR #22, 13 focused checks passed for selected-statistic parity, monthly-trend parity, empty grade cells, early pair refusal and generated dependency/lockfile alignment. Source and test bytes remained identical to the pre-rebase commit; only this base/verification note was updated. No benchmark or broad suite was repeated.
+- The source remains separate from the installed runtime and generated research dashboard. No real-data render, live activation, push, merge or Vercel deployment was performed. Remaining performance work is to examine repeated preparation across populated statistics, grade and paired-detail consumers without weakening the exact cohort and adult-continuity boundaries.
+
 ## Exporter dependency maintenance (2026-11-10)
 
 Prepared for review from public `main` at `d2bd7c3` (PR #21). The generated `package.json` and `package-lock.json` templates now both pin `@vercel/functions` to `3.11.0`; the regenerated lock also updates its required OIDC, CLI-config and Zod dependencies. A synthetic export regression checks the generated dependency pair and linked lock entries.

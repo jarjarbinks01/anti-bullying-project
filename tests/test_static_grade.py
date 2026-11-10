@@ -160,6 +160,40 @@ def test_custom_per_wave_has_no_pair_fields_and_supported_empty_is_zero():
     assert result['counts']['all']=={'T0':0,'T1':0} and phq(result)['mean'] is None
 
 
+def test_empty_grade_groups_keep_null_vectors_without_preparing_values(monkeypatch):
+    import study2.static_grade as module
+    rows = example().iloc[:0].copy()
+    rows.attrs['mode'] = 'acbd'
+    view = payload(rows)['views'][0]
+    before = rows.copy(deep=True)
+    def unused(*args, **kwargs):
+        raise AssertionError('Empty grade cells must not prepare unused values')
+    monkeypatch.setattr(module, 'values_and_status', unused)
+    cube = build_cube(rows, 'student', view, ('all',), 'student_T0')
+    assert cube == view['grade']
+    assert all(cell['counts'] == {'T0': 0, 'T1': 0} and
+               cell['statistics'] is None and cell['pairs'] is None for cell in cube['cells'])
+    pd.testing.assert_frame_equal(rows, before, check_exact=True)
+
+
+@pytest.mark.parametrize('defect', ['duplicate', 'missing_slot', 'changed_grade'])
+def test_grade_pair_checks_run_before_lazy_value_preparation(monkeypatch, defect):
+    import study2.static_grade as module
+    rows = example()
+    view = payload(rows)['views'][0]
+    if defect == 'duplicate':
+        rows = pd.concat([rows, rows.iloc[:1]], ignore_index=True)
+    elif defect == 'missing_slot':
+        rows = rows.iloc[:-1].copy()
+    else:
+        rows.loc[1, '_grade'] = 'P5'
+    def unused(*args, **kwargs):
+        raise AssertionError('Formal pair checks must run before value preparation')
+    monkeypatch.setattr(module, 'values_and_status', unused)
+    with pytest.raises(PipelineError):
+        build_cube(rows, 'student', view, ('all',), 'student_T0')
+
+
 def test_contract_validation_remains_active_under_optimized_python():
     import sys
     snap=payload(example());snap['views'][0]['grade']['cells'].append(deepcopy(snap['views'][0]['grade']['cells'][0]))

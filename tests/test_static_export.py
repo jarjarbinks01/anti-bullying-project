@@ -104,6 +104,27 @@ def test_trends_respect_batch_policy_hong_kong_month_and_do_not_reselect_waves()
     assert all('observed_at' not in str(r) and 'form-' not in str(r) for r in result)
 
 
+@pytest.mark.parametrize('role', ['student', 'parent'])
+@pytest.mark.parametrize('minimum', [0, 10])
+def test_focused_trends_exactly_match_full_report_projection(role, minimum, monkeypatch):
+    import study2.static_export as module
+    frame = rows(role)
+    frame.loc[0, 'PHQ_total'] = None
+    frame['PHQ_total__status'] = 'valid'
+    frame.loc[0, 'PHQ_total__status'] = 'missing'
+    frame.loc[2, 'PHQ_total__status'] = 'outside_report_range'
+    frame.loc[frame.wave.eq('T0'), ['date_basis', 'time_confidence']] = [
+        'batch_assigned_creation', 'accepted_creation_time']
+    actual = _trends(frame, role, minimum)
+    original = module.statistics
+    def full_report(sample, role, **settings):
+        assert settings == {'selected_variables': module.FOCUS}
+        complete = original(sample, role)
+        return complete.loc[complete.variable_id.isin(module.FOCUS)]
+    monkeypatch.setattr(module, 'statistics', full_report)
+    assert actual == _trends(frame, role, minimum)
+
+
 @pytest.mark.parametrize('bad', [{'submission_id': 'hidden'}, {'text': 'CHILD_private'},
                                   {'nested': [{'email': 'hidden'}]}, {'x': 'contact@example.org'},
                                   {'x': '/home/' + 'example/secret'}])

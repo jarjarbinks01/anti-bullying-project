@@ -479,8 +479,7 @@ def _trends(rows, role, minimum):
         first, last = selected['_month'].min(), selected['_month'].max()
         for period in pd.period_range(first, last, freq='M'):
             block = selected.loc[selected['_month'].eq(str(period))]
-            stats = statistics(block, role)
-            stats = stats.loc[stats['variable_id'].isin(FOCUS)]
+            stats = statistics(block, role, selected_variables=FOCUS)
             safe = safe_statistics(stats, minimum)
             counts = _counts(block, minimum)
             records.append(dict(period=str(period), include_batch=include_batch, counts=counts, statistics=safe))
