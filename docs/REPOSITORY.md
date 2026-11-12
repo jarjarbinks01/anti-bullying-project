@@ -55,8 +55,25 @@ immutable checkpoint assets. The final bundle captures eligibility manifests,
 review dispositions and registered dependencies; changed bundles still undergo
 restore, integrity and foreign-key verification before atomic promotion.
 `CHECKPOINT_RETENTION_PLAN.json` is review-only: lean mode never deletes historical
-backups, even when the legacy latest-only setting is enabled. Keep a designated
-previous rollback and any external launch dependencies in `protected_paths`.
+backups, even when the legacy latest-only setting is enabled. The default
+`checkpoint_retention: preserve_all` keeps the prior verified rollback in the
+plan. Explicit `protected_paths` remain protected in either mode.
+
+`recovery_policy.checkpoint_retention: single_master` designates only the latest
+verified checkpoint as the recovery master. Replacement still preserves the old
+master until the new archive has restored successfully and its pointer has been
+promoted. The new manifest records `supersedes_checkpoint` as provenance, not a
+restore dependency. Older files remain on disk and require separate dependency
+review and approval before retirement; this option never deletes them.
+
+When no coordinated-update journal remains, the master also owns the active
+administrative ledger. Its review snapshot is a hardlink to the checkpoint's
+existing compressed review bytes. Native bundle validation, reuse and restore
+understand that compressed form. An existing ledger must authenticate and its
+history must be present in the held main snapshot before either pointer can be
+promoted. Pending or completed-but-unretired publication journals keep their
+owned backup tuple. The latest full master cannot replace unique historical
+research evidence that was never in its inventory.
 
 Seven presentation-only modules are excluded from the scientific fingerprint;
 shared calculations and unknown modules remain included. Full code provenance

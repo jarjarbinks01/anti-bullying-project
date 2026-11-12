@@ -78,3 +78,27 @@ Initial entries were recorded on 2026-11-07 UTC; later entries carry their own d
 - **Reason:** Repeated full SQLite integrity scans and multiple materialized tracking histories added avoidable publication cost without changing the scientific result.
 - **Consequences:** Keep both journal-retirement verification boundaries and all mutable tuple, source, manifest, ownership and archive checks. Final tracking validation is retained because its expected history depends on a fresh publication read, even when tracking rows use a pinned snapshot. No persistent cache, metadata-only identity, changed approval authority or scientific rerun is introduced. Independent operations start fresh. Legacy recovery still parses saved tracking JSON, so the entire publication path is not claimed to use bounded memory. Source changes still require fresh applicable runtime bindings before activation. The local source-only adoption preserved unchanged scoped authority, original scientific provenance and historical recovery evidence; it did not use the different-release migration path or rerun science. The deployed committed archive is an artifact of the maintained Git source, not another implementation.
 - **Sources:** [tracking streams](../study2/dyad_operator.py), [backup verification](../study2/store.py), [coordinated update](../study2/coordinated_update.py), and their focused synthetic regressions.
+
+
+## D010: One current recovery master without erasing decision evidence
+
+- **Date/status:** Implemented and activated locally on 2026-11-10; historical retirement and source publication remain separate.
+- **Choice:** Offer opt-in lean `single_master` checkpoint retention. Use the
+  existing checkpoint, shared immutable bytes and administrative ledger. Keep the
+  predecessor through verified replacement, not as a permanent second master.
+  Allow a detached destination through the same builder and restore proof so
+  preparation cannot implicitly activate the candidate or repair live state.
+- **Reason:** Obsolete full runtime/database copies need not remain active
+  dependencies merely because earlier implementations required them.
+- **Consequences:** No automatic historical deletion. Current decision evidence,
+  stable identifiers and private source inputs remain core state. Existing
+  ledger history, permanent-ID anchors and append-only review events must
+  validate before promotion; a missing review workspace cannot replace an
+  existing review-bearing master. Coordinated journals retain
+  their owned backup tuple until native retirement. Unique historical evidence
+  still requires separate review before removal. This extends D002/D005 without
+  weakening accepted research scope or rewriting original decisions.
+- **Sources:** [checkpoint implementation](../study2/checkpoints.py),
+  [retention policy](../study2/lean_recovery.py),
+  [administrative recovery](../study2/dyad_operator.py) and
+  [recovery contract](PORTABLE_WORKFLOW.md#one-current-recovery-master).

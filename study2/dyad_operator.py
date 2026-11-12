@@ -243,7 +243,7 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
         del saved_data
         if prior['hash'] != saved['tracking_hash']:
             raise PipelineError('Administrative recovery index mismatch')
-        if saved['tracking_hash'] == tracking_hash and saved['files'].get('review.sqlite') == review_hash:
+        if saved['tracking_hash'] == tracking_hash and _review_snapshot_hash(saved) == review_hash:
             return prior['bundle']
     folder = Path(cfg['state_dir']) / 'dyad_backups' / ('bundle_' + uuid.uuid4().hex)
     secure_directory(folder)
@@ -271,7 +271,31 @@ def backup_tracking(db, cfg, reason='manual', promote=True):
     return str(folder)
 
 
-def verify_bundle(folder):
+def _review_snapshot_hash(manifest):
+    files = manifest['files']
+    if 'review.sqlite.gz' in files:
+        expected = manifest.get('review_logical_sha256')
+        if ('review.sqlite' in files or not isinstance(expected, str) or len(expected) != 64
+                or any(c not in '0123456789abcdef' for c in expected)):
+            raise PipelineError('Compressed review recovery snapshot needs one logical checksum')
+        return expected
+    if 'review_logical_sha256' in manifest:
+        raise PipelineError('Compressed review recovery archive is missing from the manifest')
+    return files.get('review.sqlite')
+
+
+def _require_review_history(saved, live):
+    """Native review events are append-only; mutable task states may progress."""
+    try:
+        for row in saved.execute('SELECT id,at,kind,target,payload FROM events ORDER BY id'):
+            current = live.execute('SELECT id,at,kind,target,payload FROM events WHERE id=?', (row[0],)).fetchone()
+            if current is None or tuple(row) != tuple(current):
+                raise PipelineError('Current review workspace is missing or conflicts with saved review history')
+    except sqlite3.DatabaseError as error:
+        raise PipelineError('Current review history cannot be verified') from error
+
+
+def verify_bundle(folder, *, current_review=None):
     folder = Path(folder)
     if (folder/'tracking.retention.json').is_file():
         raise PipelineError('This physical administrative backup was pruned; restore the latest complete checkpoint')
@@ -289,24 +313,34 @@ def verify_bundle(folder):
         except (OSError,EOFError,ValueError) as error:raise PipelineError('Administrative checkpoint content is corrupt') from error
     if _saved_tracking_revision(data) != manifest['tracking_hash'] or set(data) not in (set(), set(TABLES)):
         raise PipelineError('登記備份內容不完整')
-    if (folder / 'review.sqlite').exists():
-        db = sqlite3.connect(f"file:{folder / 'review.sqlite'}?mode=ro", uri=True)
-        try:
-            if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-                raise PipelineError('審核工作區備份損壞')
-        finally:
-            db.close()
+    review_hash = _review_snapshot_hash(manifest)
+    if review_hash is not None:
+        with backup_path(folder/'review.sqlite', review_hash) as review:
+            db = sqlite3.connect(review.resolve().as_uri()+'?mode=ro', uri=True)
+            try:
+                if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                    raise PipelineError('審核工作區備份損壞')
+                if current_review is not None:
+                    _require_review_history(db, current_review)
+            finally:
+                db.close()
     return manifest, data
 
 
-def recovery_check(db, cfg):
+def recovery_check(db, cfg, *, current_review=None):
     pointer = Path(cfg['state_dir']) / 'DYAD_LEDGER.json'
     if not pointer.exists():
         return
     p = json.loads(pointer.read_text())
-    verified, data = verify_bundle(p['bundle'])
+    verified, data = verify_bundle(p['bundle'], current_review=current_review)
     if p['hash'] != verified['tracking_hash']:
         raise PipelineError('登記歷史索引不一致，必須先核對還原')
+    _require_tracking_history(db, data)
+    return verified
+
+
+def _require_tracking_history(db, data):
+    """Require every saved permanent ID and immutable administrative event."""
     if not data:
         return
     if not dyads.exists(db):
@@ -314,13 +348,22 @@ def recovery_check(db, cfg):
     # Never drop issued IDs or invitation/adjudication events when restoring an
     # older research database. Extra newer live rows are safe, missing rows are not.
     keys = {'dyad_registry': 'dyad_id', 'dyad_invitation_events': 'operation_id',
-            'dyad_resolutions': 'operation_id', 'dyad_events': 'event_id'}
+            'dyad_resolutions': 'operation_id', 'dyad_events': 'event_id',
+            'dyad_aliases': 'alias_id'}
     for table, key in keys.items():
         current_rows = {r[key]: dict(r) for r in db.execute('SELECT * FROM ' + table)}
         for row in data[table]:
             if row[key] not in current_rows:
                 raise PipelineError('還原的資料庫遺漏永久登記或行政歷史，必須核對及還原追蹤備份')
-            if table != 'dyad_registry' and row != current_rows[row[key]]:
+            live = current_rows[row[key]]
+            if table == 'dyad_registry':
+                if any(row[k] != live[k] for k in row if k not in {'lifecycle', 'first_published_run_id'}):
+                    raise PipelineError('永久登記資料與已保存的歷史衝突，不能繼續操作')
+                if row['first_published_run_id'] is not None and row['first_published_run_id'] != live['first_published_run_id']:
+                    raise PipelineError('永久登記首次發布版本與已保存的歷史衝突，不能繼續操作')
+                if row['lifecycle'] == 'retired' and live['lifecycle'] != 'retired':
+                    raise PipelineError('資料庫恢復了已停用登記，必須先核對還原')
+            elif row != live:
                 raise PipelineError('登記行政歷史內容衝突，不能繼續操作')
 
 
@@ -411,9 +454,11 @@ def _restore_bundle(folder, main_backup, destination):
         if target is not None:
             target.close()
     (destination / 'study2.sqlite').chmod(0o600)
-    if (Path(folder) / 'review.sqlite').exists():
-        shutil.copy2(Path(folder) / 'review.sqlite', destination / 'review.sqlite')
-        (destination / 'review.sqlite').chmod(0o600)
+    review_hash = _review_snapshot_hash(manifest)
+    if review_hash is not None:
+        with backup_path(Path(folder)/'review.sqlite', review_hash) as review:
+            shutil.copy2(review, destination/'review.sqlite')
+        (destination/'review.sqlite').chmod(0o600)
     retained = destination / 'recovered_tracking'
     shutil.copytree(folder, retained)
     atomic_json(destination / 'DYAD_LEDGER.json', {'bundle': str(retained), 'hash': manifest['tracking_hash']})

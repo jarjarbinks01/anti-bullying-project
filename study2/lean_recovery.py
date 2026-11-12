@@ -30,7 +30,14 @@ def enabled(cfg):
     mode = cfg.get('recovery_policy', {}).get('mode')
     if mode not in (None, 'legacy', 'lean'):
         raise PipelineError('Unknown recovery policy; refusing a fallback to legacy retention')
+    retention = cfg.get('recovery_policy', {}).get('checkpoint_retention', 'preserve_all')
+    if retention not in ('preserve_all', 'single_master') or retention == 'single_master' and mode != 'lean':
+        raise PipelineError('Checkpoint retention must be preserve_all or lean single_master')
     return mode == 'lean'
+
+
+def single_master(cfg):
+    return enabled(cfg) and cfg.get('recovery_policy', {}).get('checkpoint_retention') == 'single_master'
 
 
 def scientific_program_hash(directory):
@@ -170,7 +177,7 @@ def retention_plan(cfg, final, previous=None):
     """Review-only checkpoint inventory. Never a deletion authorization."""
     state = Path(cfg['state_dir'])
     retained = {str(Path(final).resolve()): 'current verified recovery'}
-    if previous:
+    if previous and not single_master(cfg):
         retained[str(Path(previous).resolve())] = 'previous verified rollback'
     for item in cfg.get('recovery_policy', {}).get('required_assets', []):
         retained[str(Path(item['path']).resolve())] = 'explicit runtime/control dependency'
@@ -187,5 +194,7 @@ def retention_plan(cfg, final, previous=None):
         rows.append({'path': str(path), 'disposition': 'retain' if reasons else 'needs_dependency_review',
                      'reasons': reasons, 'deletion_authorized': False})
     return {'format_version': 1, 'mode': 'review_only', 'automatic_deletion': False,
+            'checkpoint_retention': 'single_master' if single_master(cfg) else 'preserve_all',
+            'authoritative_checkpoint': str(Path(final).resolve()),
             'checkpoints': rows, 'protected_paths': retained,
             'note': 'No size/savings claim; hardlinks and external launch references require review before deletion.'}

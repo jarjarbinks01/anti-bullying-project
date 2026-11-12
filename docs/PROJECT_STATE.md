@@ -12,6 +12,56 @@ Study 2 links responses about the same child, selects T0/T1 observations, preser
 
 The [decision log](DECISIONS.md) explains consequential choices. Current method definitions remain in [matching rules](MATCHING_RULES.md), [data model](DATA_MODEL.md) and [descriptive analysis](DESCRIPTIVE_ANALYSIS.md). Do not duplicate those specifications here.
 
+## Current recovery master (2026-11-10)
+
+Pre-PR review on 2026-11-12 reproduced a replacement gap when the ledger pointer
+was missing or older than the current master. The source fix applies the existing
+tracking-history validator to the prior master as well as the ledger, while
+reusing equal authenticated revisions. Synthetic regressions cover lost or
+conflicting events, changed registration anchors, legitimate new events and
+unchanged reuse. This follow-up is source-only; it does not activate code, change
+private research state or retire recovery evidence. All 72 cases in the single-master
+and lean-recovery test files passed, including nine new cases. Independent review
+found the history gap closed with no further blocker. Existing pandas deprecation
+warnings remain; the full repository suite was not rerun.
+
+A local source-only branch prepares an opt-in `single_master` lean retention
+policy. The existing checkpoint becomes the administrative recovery owner after
+journal retirement; its review bytes are shared in compressed form. Existing
+ledger integrity and history are checked before promotion, including failed
+operations and unchanged reuse. Default retention remains unchanged. Detached
+preparation now uses the existing builder and one native isolated restore proof
+without changing live bindings, pointers or retention. One current real-data
+candidate passed that proof; private operational evidence records its identity,
+asset inventory and capacity. That preparation included no code activation, historical deletion, scientific
+rerun, export, repository publication or deployment. Focused synthetic
+checks passed 52 distinct cases, including bounded rechecks after detached admission
+fixes: master and administrative
+restore, compressed-review tampering, replacement failures, stale/corrupt history
+refusal, missing/stale review workspaces, alias and registration continuity,
+legitimate new review/registration progress, journal ownership, opt-out and
+inherited dependency guards. Independent source review caught and resolved the
+missing pre-promotion ledger check, review/registration admission gaps and missing
+published-baseline/checksum refusal. Final source review found no blocker. An
+initial broader selection was interrupted during that correction and is not
+counted as final verification. A bounded read-only current-control admission
+passed with the narrowed private inventory before the detached follow-up; it was
+not repeated. The full repository suite was not run. Detached archive verification alone
+does not establish runnable launch bindings.
+
+
+The approved source-only activation subsequently qualified and switched the
+editable package, default configuration, selector, eight launcher helpers and
+scheduler. Installed runtime and protected startup passed current-control and
+unchanged-site checks. One ordinary checkpoint captured the final bindings,
+passed its native isolated restore and became both the current master and the
+administrative-ledger owner. Main/review database bytes and the scientific release
+remained unchanged. The scheduler was restored last at its existing 15-minute
+cadence. Legacy cleanup remains disabled; previous checkpoints, source and
+historical evidence were preserved. No additional broad suite, scientific run,
+dashboard export, source publication or remote deployment was performed. Private
+activation, restore and rollback receipts retain the exact identities and limits.
+
 ## Dashboard computation follow-up (2026-11-10)
 
 Implemented locally on `perf/dashboard-computation-20261110` and rebased onto fetched public `main` at `1322948` (PR #22), which includes dependency-maintenance commit `287fba0` and PR #21 merge `d2bd7c3`. The rebase was conflict-free and preserved the complete source tree. Monthly static trends now request only their seven exported metrics from the unchanged native calculation. Grade cells prepare normalized values only when a populated group needs them, retaining explicit empty cells and the existing pair checks. No persistent cache, cohort reselection or scientific definition change is introduced.
