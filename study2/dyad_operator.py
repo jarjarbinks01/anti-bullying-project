@@ -335,8 +335,14 @@ def recovery_check(db, cfg, *, current_review=None):
     verified, data = verify_bundle(p['bundle'], current_review=current_review)
     if p['hash'] != verified['tracking_hash']:
         raise PipelineError('登記歷史索引不一致，必須先核對還原')
+    _require_tracking_history(db, data)
+    return verified
+
+
+def _require_tracking_history(db, data):
+    """Require every saved permanent ID and immutable administrative event."""
     if not data:
-        return verified
+        return
     if not dyads.exists(db):
         raise PipelineError('還原的主資料庫缺少已保存的永久登記，必須先還原追蹤備份')
     # Never drop issued IDs or invitation/adjudication events when restoring an
@@ -359,7 +365,6 @@ def recovery_check(db, cfg, *, current_review=None):
                     raise PipelineError('資料庫恢復了已停用登記，必須先核對還原')
             elif row != live:
                 raise PipelineError('登記行政歷史內容衝突，不能繼續操作')
-    return verified
 
 
 def _require_restore_history(origin, data):

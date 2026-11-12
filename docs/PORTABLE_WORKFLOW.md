@@ -183,8 +183,11 @@ promotion without another scientific run.
 Replacement refuses missing review workspaces, lost or conflicting append-only
 review events, missing aliases, changed registration anchors or first publication,
 and reactivated retired IDs. Legitimate new review events and nonretired lifecycle
-changes remain allowed. Both the prior master and ledger protect review history
-when journal ownership has deferred ledger promotion.
+changes remain allowed. Both the prior master and ledger protect administrative
+and review history,
+including when the ledger pointer is missing, older, or deferred by journal
+ownership. The same tracking-history validator checks both owners; equal
+authenticated tracking revisions reuse the ledger check.
 
 For preparation, `save_checkpoint(..., destination=new_directory)` uses the same
 builder and one native isolated restore proof without changing live checkpoint

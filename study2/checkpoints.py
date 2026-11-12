@@ -336,9 +336,21 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None,*,des
                 # Never let a checkpoint of stale/corruptly restored main data
                 # replace the ledger that proves missing administrative work.
                 # This also covers reuse and failed-operation checkpoints.
-                from .dyad_operator import recovery_check, _review_snapshot_hash, _require_review_history
+                from .dyad_operator import recovery_check, verify_bundle, _require_tracking_history, _review_snapshot_hash, _require_review_history
                 live_review = sources.get('review.sqlite')
                 saved_ledger = recovery_check(sources['study2.sqlite'], cfg, current_review=live_review)
+                # The master can be newer than a deferred or restored ledger.
+                # Reuse the same history validator; equal authenticated tracking
+                # revisions need no second bundle verification.
+                prior_tracking = old_manifest['files'].get('recovered_tracking/manifest.json') if old_manifest else None
+                if prior_tracking:
+                    tracking_path = previous/'recovered_tracking/manifest.json'
+                    if file_hash(tracking_path) != prior_tracking['sha256']:
+                        raise PipelineError('Previous checkpoint tracking manifest checksum mismatch')
+                    tracking = json.loads(tracking_path.read_text())
+                    if not saved_ledger or tracking['tracking_hash'] != saved_ledger['tracking_hash']:
+                        _, data = verify_bundle(tracking_path.parent)
+                        _require_tracking_history(sources['study2.sqlite'], data)
                 # An absent workspace is loss, not an intentional empty review.
                 # Either prior owner can prove that review recovery is required.
                 if 'review.sqlite' not in sources and any(

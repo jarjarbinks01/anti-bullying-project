@@ -187,6 +187,71 @@ def test_stale_or_corrupt_history_cannot_replace_either_pointer(single, damage, 
     assert pointer(single) == before and ledger(single) == prior
 
 
+@pytest.mark.parametrize('owner', ['missing_ledger', 'older_ledger'])
+@pytest.mark.parametrize('damage', ['missing_event', 'conflicting_event', 'changed_anchor'])
+def test_master_tracking_survives_missing_or_older_ledger(single, owner, damage):
+    state = Path(single['state_dir'])
+    checkpoints.save_checkpoint(single, force=True)
+    older = ledger(single)
+    db = connect(state)
+    with db:
+        db.execute('INSERT INTO dyad_events VALUES (?,?,?,?,?,?,?)',
+                   ('master-event', 'now', 'example', None, 'researcher', 'accepted', '{}'))
+        db.execute('INSERT INTO dyad_registry VALUES (?,?,?,?,?,?,?,?)',
+                   ('master-id', 'student', 'parent', 'run', 'now', '{}', 'active', None))
+    db.close()
+    checkpoints.save_checkpoint(single, force=True)
+    db = connect(state)
+    with db:
+        if damage == 'missing_event':
+            db.execute('DELETE FROM dyad_events')
+        elif damage == 'conflicting_event':
+            db.execute("UPDATE dyad_events SET payload_json=?", ('{"changed": true}',))
+        else:
+            db.execute('DROP TRIGGER dyad_immutable_registration')
+            db.execute("UPDATE dyad_registry SET first_student_id='changed'")
+    db.close()
+    if owner == 'missing_ledger':
+        (state/'DYAD_LEDGER.json').unlink()
+    else:
+        atomic_json(state/'DYAD_LEDGER.json', older)
+    paths = [state/name for name in ('CURRENT_CHECKPOINT.json', 'DYAD_LEDGER.json')]
+    before = [p.read_bytes() if p.exists() else None for p in paths]
+    with pytest.raises(PipelineError):
+        checkpoints.save_checkpoint(single, force=True)
+    assert [p.read_bytes() if p.exists() else None for p in paths] == before
+
+
+@pytest.mark.parametrize('owner', ['missing_ledger', 'older_ledger'])
+def test_master_tracking_allows_new_events_without_current_ledger(single, owner):
+    state = Path(single['state_dir'])
+    checkpoints.save_checkpoint(single, force=True)
+    older = ledger(single)
+    for event_id in ('master-event', 'new-event'):
+        db = connect(state)
+        with db:
+            db.execute('INSERT INTO dyad_events VALUES (?,?,?,?,?,?,?)',
+                       (event_id, 'now', 'example', None, 'researcher', 'accepted', '{}'))
+        db.close()
+        if event_id == 'master-event':
+            checkpoints.save_checkpoint(single, force=True)
+    if owner == 'missing_ledger':
+        (state/'DYAD_LEDGER.json').unlink()
+    else:
+        atomic_json(state/'DYAD_LEDGER.json', older)
+    result = checkpoints.save_checkpoint(single, force=True)
+    assert ledger(single)['bundle'] == str(Path(result['path'])/'recovered_tracking')
+    _, data = dyad_operator.verify_bundle(ledger(single)['bundle'])
+    assert {row['event_id'] for row in data['dyad_events']} == {'master-event', 'new-event'}
+
+
+def test_unchanged_master_verifies_shared_tracking_once(single):
+    checkpoints.save_checkpoint(single, force=True)
+    with patch.object(dyad_operator, 'verify_bundle', wraps=dyad_operator.verify_bundle) as verify:
+        assert checkpoints.save_checkpoint(single, force=True)['unchanged']
+    assert verify.call_count == 1
+
+
 @pytest.mark.parametrize('owner', ['both', 'ledger_only', 'checkpoint_only'])
 def test_missing_review_cannot_replace_master(single, owner):
     state = Path(single['state_dir'])

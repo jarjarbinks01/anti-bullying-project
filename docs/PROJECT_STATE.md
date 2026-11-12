@@ -14,6 +14,17 @@ The [decision log](DECISIONS.md) explains consequential choices. Current method 
 
 ## Current recovery master (2026-11-10)
 
+Pre-PR review on 2026-11-12 reproduced a replacement gap when the ledger pointer
+was missing or older than the current master. The source fix applies the existing
+tracking-history validator to the prior master as well as the ledger, while
+reusing equal authenticated revisions. Synthetic regressions cover lost or
+conflicting events, changed registration anchors, legitimate new events and
+unchanged reuse. This follow-up is source-only; it does not activate code, change
+private research state or retire recovery evidence. All 72 cases in the single-master
+and lean-recovery test files passed, including nine new cases. Independent review
+found the history gap closed with no further blocker. Existing pandas deprecation
+warnings remain; the full repository suite was not rerun.
+
 A local source-only branch prepares an opt-in `single_master` lean retention
 policy. The existing checkpoint becomes the administrative recovery owner after
 journal retirement; its review bytes are shared in compressed form. Existing
