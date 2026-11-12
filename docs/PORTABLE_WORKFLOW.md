@@ -170,6 +170,40 @@ release evidence until the intended recovery path has been demonstrated. A real
 transition must coordinate the launcher, interpreter/package binding, working
 directory, dispatcher/selector and configuration, not only an entrypoint pointer.
 
+### One current recovery master
+
+The opt-in lean `checkpoint_retention: single_master` policy uses the existing
+checkpoint, object store and administrative ledger. It adds no backup database.
+It validates the existing ledger against the held main snapshot, restores a new
+candidate before promotion and preserves the previous master on failure. After
+native journal retirement, the active ledger can point to the master's tracking
+and compressed review snapshot. An unchanged save can finish deferred ledger
+promotion without another scientific run.
+
+Replacement refuses missing review workspaces, lost or conflicting append-only
+review events, missing aliases, changed registration anchors or first publication,
+and reactivated retired IDs. Legitimate new review events and nonretired lifecycle
+changes remain allowed. Both the prior master and ledger protect review history
+when journal ownership has deferred ledger promotion.
+
+For preparation, `save_checkpoint(..., destination=new_directory)` uses the same
+builder and one native isolated restore proof without changing live checkpoint
+or ledger pointers, retention reports, pending markers, object storage or runtime
+bindings. It holds the existing writer lock and read-only database snapshots,
+refuses unfinished activation/transition journals, and requires the published
+release's existing valid checksum/baseline evidence. It never repairs that
+evidence in live state. Reused archives cannot change historical permissions.
+Preparation does not qualify relocated launchers or authorize later deletion.
+
+The retention report still cannot authorize deletion. Remove obsolete runtime
+copies from a separately prepared current dependency inventory only after checking
+actual consumers. Preserve current native databases, source identity mappings,
+accepted decisions and exact evidence, including small older records still used
+to authenticate a current decision. Generic source documentation is not a backup
+of private research decisions or inputs. Keep unique historical evidence before
+retiring old complete database images; a current checkpoint captures the current
+release, not all historical external release directories.
+
 ### Source-only runtime updates
 
 A performance-only source update need not create a new scientific release when

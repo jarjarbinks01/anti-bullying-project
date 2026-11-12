@@ -136,6 +136,17 @@ def _add_asset(folder,manifest,source,relative,object_root=None):
     manifest['files'][str(relative)]={'sha256':original,'restore_path':str(relative)}
 
 
+def _reuse_asset(source, target):
+    """Reuse immutable bytes without chmod changing a historical source inode."""
+    if source.stat().st_mode & 0o777 == 0o600:
+        from .artifacts import copy_object
+        copy_object(source, target)
+    else:
+        secure_directory(target.parent)
+        shutil.copy2(source, target)
+        target.chmod(0o600)
+
+
 def _asset_inventory(cfg,main):
     """Use the same complete source inventory for freshness and capture."""
     from .store import current
@@ -183,7 +194,7 @@ def _asset_inventory(cfg,main):
     return release,dict(sorted(assets.items()))
 
 
-def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,old_manifest=None):
+def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,old_manifest=None,*,detached=False):
     from .dyad_operator import TABLES
     from .store import current
     release=current(main)
@@ -196,7 +207,7 @@ def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,o
     manifest['files']['checkpoint_config.json']={'sha256':file_hash(folder/'checkpoint_config.json')}
     from .lean_recovery import enabled, recovery_bindings
     lean=enabled(cfg)
-    object_root=Path(cfg['state_dir'])/'artifact_objects' if lean else None
+    object_root=Path(cfg['state_dir'])/'artifact_objects' if lean and not detached else None
     if lean or cfg.get('runtime_environment'):
         from .lean_recovery import ENVIRONMENT_PATHS
         bindings=recovery_bindings(cfg,assets) if lean else {
@@ -224,8 +235,7 @@ def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,o
         archive_name=name+'.gz' if relative.parts[0]=='releases' and p.suffix=='.jsonl' else name
         old_entry=old_manifest.get('files',{}).get(archive_name) if lean and old_manifest else None
         if old_entry and old_manifest.get('input_assets',{}).get(name)==asset_hashes[name]:
-            from .artifacts import copy_object
-            copy_object(previous/archive_name,folder/archive_name)
+            _reuse_asset(previous/archive_name,folder/archive_name)
             manifest['files'][archive_name]=dict(old_entry)
             continue
         if relative.parts[0]=='releases' and p.suffix=='.jsonl':
@@ -239,10 +249,9 @@ def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,o
     # Administrative overlay is rebuilt from the same frozen main snapshot.
     present=main.execute("SELECT 1 FROM sqlite_master WHERE name='dyad_registry'").fetchone()
     if present and lean and old_manifest and old_manifest['source_hashes'].get('study2.sqlite')==manifest['source_hashes'].get('study2.sqlite') and all('recovered_tracking/'+n in old_manifest['files'] for n in ('tracking.json.gz','manifest.json')):
-        from .artifacts import copy_object
         for name in ('tracking.json.gz','manifest.json'):
             relative='recovered_tracking/'+name
-            copy_object(previous/relative,folder/relative)
+            _reuse_asset(previous/relative,folder/relative)
             manifest['files'][relative]=dict(old_manifest['files'][relative])
     elif present:
         data={t:[dict(row) for row in main.execute('SELECT * FROM '+t+' ORDER BY 1')] for t in TABLES}
@@ -257,13 +266,52 @@ def _capture_assets(folder,manifest,cfg,main,assets,asset_hashes,previous=None,o
         for name in ['tracking.json.gz','manifest.json']:
             manifest['files']['recovered_tracking/'+name]={'sha256':file_hash(folder/'recovered_tracking'/name)}
 
+    # A single-master ledger carries its review snapshot inside the same
+    # checkpoint. The second pathname shares the existing immutable gzip bytes.
+    # Atomic manifest replacement must not mutate a reused prior hardlink.
+    from .lean_recovery import single_master
+    if present:
+        tracking_path = folder/'recovered_tracking/manifest.json'
+        tracking = json.loads(tracking_path.read_text())
+        if single_master(cfg) and 'review.sqlite.gz' in manifest['files']:
+            review = manifest['files']['review.sqlite.gz']
+            relative = 'recovered_tracking/review.sqlite.gz'
+            _reuse_asset(folder/'review.sqlite.gz', folder/relative)
+            tracking['files']['review.sqlite.gz'] = review['sha256']
+            tracking['review_logical_sha256'] = review['uncompressed_sha256']
+            manifest['files'][relative] = {'sha256': review['sha256']}
+        else:
+            # Opting out can reuse tracking from a single master. Its review
+            # alias was not copied, so do not leave a dangling manifest entry.
+            tracking['files'].pop('review.sqlite.gz', None)
+            tracking.pop('review_logical_sha256', None)
+        atomic_json(tracking_path, tracking)
+        manifest['files']['recovered_tracking/manifest.json'] = {'sha256': file_hash(tracking_path)}
 
-def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
+
+def save_checkpoint(cfg,reason='operator',force=False,config_override=None,*,destination=None):
+    """Build and prove a checkpoint; destination prepares it without activation."""
     from .store import writer_lock
+    from .owned_locks import exclusive
     from .storage import records_v2
-    state=Path(cfg['state_dir']);root=state/'checkpoints';secure_directory(root)
+    state=Path(cfg['state_dir'])
+    detached=destination is not None
+    if detached:
+        destination=Path(destination).absolute()
+        if (destination.exists() or destination.resolve().is_relative_to(state.resolve())
+            or any(p.is_symlink() for p in (destination,*destination.parents))):
+            raise PipelineError('Detached checkpoint destination must be new and outside live state')
+    root=destination.parent if detached else state/'checkpoints';secure_directory(root)
     pointer=state/'CURRENT_CHECKPOINT.json'
-    with writer_lock(state):
+    with exclusive(state/'writer.lock') if detached else writer_lock(state):
+        if detached:
+            # Do not let a read-only capture repair an interrupted live switch.
+            transition=state/'COORDINATED_UPDATE.json'
+            if transition.exists() and json.loads(transition.read_text()).get('status') in {'draining','pending'}:
+                raise PipelineError('Detached checkpoint requires coordinated transition recovery to finish first')
+            activation=state/'STORAGE_ACTIVATION.json'
+            if activation.exists() and json.loads(activation.read_text()).get('status')=='applying':
+                raise PipelineError('Detached checkpoint requires activation recovery to finish first')
         sources={};connections=[]
         try:
             for name in ['study2.sqlite','review.sqlite']:
@@ -280,24 +328,58 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                     raise PipelineError('Checkpoint requires DELETE journal mode: '+name+' uses '+mode.upper())
                 sources[name]=db
             if not force and not records_v2(sources['study2.sqlite']):return {'legacy_storage':True}
+            old=json.loads(pointer.read_text()) if pointer.exists() else None
+            previous=Path(old['path']) if old else None
+            old_manifest=checkpoint_manifest(previous) if previous else None
+            from .lean_recovery import single_master
+            if single_master(cfg):
+                # Never let a checkpoint of stale/corruptly restored main data
+                # replace the ledger that proves missing administrative work.
+                # This also covers reuse and failed-operation checkpoints.
+                from .dyad_operator import recovery_check, _review_snapshot_hash, _require_review_history
+                live_review = sources.get('review.sqlite')
+                saved_ledger = recovery_check(sources['study2.sqlite'], cfg, current_review=live_review)
+                # An absent workspace is loss, not an intentional empty review.
+                # Either prior owner can prove that review recovery is required.
+                if 'review.sqlite' not in sources and any(
+                    {'review.sqlite', 'review.sqlite.gz'} & set(saved.get('files', {}))
+                    for saved in (saved_ledger, old_manifest) if saved
+                ):
+                    raise PipelineError('Current review workspace is missing; restore it before replacing the recovery master')
+                # A deferred/older ledger may not contain the master's latest
+                # review events. Compare distinct snapshots once, before reuse.
+                prior_review = old_manifest['files'].get('review.sqlite.gz') if old_manifest else None
+                if live_review is not None and prior_review and (
+                    not saved_ledger or _review_snapshot_hash(saved_ledger) != prior_review['uncompressed_sha256']
+                ):
+                    from .store import backup_path
+                    with backup_path(previous/'review.sqlite', prior_review['uncompressed_sha256']) as saved:
+                        review = sqlite3.connect(saved.resolve().as_uri()+'?mode=ro', uri=True)
+                        try:
+                            _require_review_history(review, live_review)
+                        finally:
+                            review.close()
             source_hashes={name:file_hash(state/name) for name in sources}
             from .common import digest
             from .store import current
             release=current(sources['study2.sqlite'])
-            if release and (Path(release['path'])/'checksums.json').is_file():
-                from .publication_baseline import ensure_baseline
-                ensure_baseline(release['path'],release['release_id'])
+            if release:
+                from .publication_baseline import ensure_baseline, read_baseline
+                if detached:
+                    if not (Path(release['path'])/'checksums.json').is_file():
+                        raise PipelineError('Detached checkpoint requires published release checksums')
+                    if read_baseline(release['path'],release['release_id']) is None:
+                        raise PipelineError('Detached checkpoint requires an existing valid publication baseline')
+                elif (Path(release['path'])/'checksums.json').is_file():
+                    ensure_baseline(release['path'],release['release_id'])
             release,assets=_asset_inventory(cfg,sources['study2.sqlite'])
             asset_hashes={name:file_hash(p) for name,p in assets.items()}
             settings={'config':config_override or cfg,'assets':asset_hashes}
             input_revision=digest(settings)
-            old=json.loads(pointer.read_text()) if pointer.exists() else None
-            previous=None;old_manifest=None
             if old:
-                previous=Path(old['path']);old_manifest=checkpoint_manifest(previous)
                 if any((previous/_safe_relative(name)).is_symlink() or not (previous/_safe_relative(name)).is_file() or file_hash(previous/_safe_relative(name))!=entry['sha256']
                        for name,entry in old_manifest['files'].items()):old_manifest=None
-                if old_manifest and old_manifest['source_hashes']==source_hashes and old_manifest.get('input_revision')==input_revision:
+                if not detached and old_manifest and old_manifest['source_hashes']==source_hashes and old_manifest.get('input_revision')==input_revision:
                     _finish_retention(cfg,previous)
                     (state/'CHECKPOINT_PENDING.json').unlink(missing_ok=True)
                     return {'unchanged':True,'checkpoint_id':old_manifest['checkpoint_id'],'path':str(previous)}
@@ -309,32 +391,36 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
                 for name,source in sources.items():
                     previous_entry=old_manifest['files'].get(name+'.gz') if old_manifest else None
                     if previous_entry and old_manifest['source_hashes'].get(name)==source_hashes[name]:
-                        from .artifacts import copy_object
                         saved=previous/(name+'.gz')
                         if file_hash(saved)!=previous_entry['sha256']:raise PipelineError('Previous checkpoint archive checksum mismatch')
-                        copy_object(saved,temporary/(name+'.gz'))
+                        _reuse_asset(saved,temporary/(name+'.gz'))
                         manifest['files'][name+'.gz']=dict(previous_entry)
                         continue
                     plain=temporary/name;target=sqlite3.connect(plain);source.backup(target);target.close();plain.chmod(0o600)
                     archive=temporary/(name+'.gz');h=_gzip(plain,archive);plain.unlink()
                     manifest['files'][archive.name]={'sha256':file_hash(archive),'gzip':True,
                                 'uncompressed_sha256':h,'restore_path':name}
-                _capture_assets(temporary,manifest,cfg,sources['study2.sqlite'],assets,asset_hashes,previous,old_manifest)
+                _capture_assets(temporary,manifest,cfg,sources['study2.sqlite'],assets,asset_hashes,previous,old_manifest,detached=detached)
                 _,current_assets=_asset_inventory(cfg,sources['study2.sqlite'])
                 if {name:file_hash(p) for name,p in current_assets.items()}!=asset_hashes:
                     raise PipelineError('Checkpoint asset inventory changed during capture')
                 if config_override:
                     atomic_json(temporary/'checkpoint_config.json',config_override)
                     manifest['files']['checkpoint_config.json']['sha256']=file_hash(temporary/'checkpoint_config.json')
-                from .lean_recovery import enabled
+                from .lean_recovery import enabled, single_master
                 if enabled(cfg) and old_manifest:
-                    manifest['previous_verified_checkpoint']={'path':str(previous),'checkpoint_id':old_manifest['checkpoint_id'],
+                    key = 'supersedes_checkpoint' if single_master(cfg) else 'previous_verified_checkpoint'
+                    manifest[key]={'path':str(previous),'checkpoint_id':old_manifest['checkpoint_id'],
                         'manifest_sha256':file_hash(previous/'manifest.json')}
                 atomic_json(temporary/'manifest.json',manifest)
                 atomic_json(temporary/'manifest.sha256.json',{'manifest.json':file_hash(temporary/'manifest.json')})
                 with tempfile.TemporaryDirectory(prefix='study2-checkpoint-proof-') as temp:
                     restore_checkpoint(temporary,Path(temp)/'restored',verify_only=True)
-                final=root/cid;os.replace(temporary,final)
+                final=destination if detached else root/cid
+                if final.exists():raise PipelineError('Checkpoint destination already exists')
+                os.replace(temporary,final)
+                if detached:
+                    return {'checkpoint_id':cid,'path':str(final),'verified_recovery':True,'detached':True}
                 atomic_json(pointer,{'checkpoint_id':cid,'path':str(final),'manifest_sha256':file_hash(final/'manifest.json')})
                 _finish_retention(cfg,final)
                 (state/'CHECKPOINT_PENDING.json').unlink(missing_ok=True)
@@ -347,11 +433,21 @@ def save_checkpoint(cfg,reason='operator',force=False,config_override=None):
 
 def _finish_retention(cfg,final):
     """Promote the ledger before pruning; retry unfinished cleanup on reuse."""
-    from .lean_recovery import enabled, retention_plan
+    from .lean_recovery import enabled, retention_plan, single_master
     if enabled(cfg):
         manifest=checkpoint_manifest(final)
         previous=manifest.get('previous_verified_checkpoint',{}).get('path')
-        atomic_json(Path(cfg['state_dir'])/'CHECKPOINT_RETENTION_PLAN.json',retention_plan(cfg,final,previous))
+        state = Path(cfg['state_dir'])
+        tracking = Path(final)/'recovered_tracking/manifest.json'
+        # A completed publication journal still owns its exact backup tuple.
+        # Wait for native retirement; a later unchanged save can finish this.
+        if single_master(cfg) and tracking.is_file() and not (state/'COORDINATED_UPDATE.json').exists():
+            saved=json.loads(tracking.read_text())
+            ledger={'bundle':str(tracking.parent),'hash':saved['tracking_hash']}
+            pointer=state/'DYAD_LEDGER.json'
+            if not pointer.is_file() or json.loads(pointer.read_text())!=ledger:
+                atomic_json(pointer,ledger)
+        atomic_json(state/'CHECKPOINT_RETENTION_PLAN.json',retention_plan(cfg,final,previous))
         return
     if not cfg.get('checkpoint_policy',{}).get('latest_complete_only'):
         return
